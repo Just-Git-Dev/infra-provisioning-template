@@ -1,0 +1,85 @@
+name: Provision project infra
+
+# EXAMPLE caller workflow — provisions one project's infra from projects/<key>/config.yaml.
+#
+# Two ways to consume the engine (this file shows the ACTION path):
+#   • As an ACTION  — `uses: Just-Git-Dev/infra-provisioning-template@v1` (shared engine).
+#   • In a TEMPLATE clone — you already have engine/ locally; swap the `uses:` for
+#     `uses: ./` (runs the engine bundled in your copy).
+#
+# Authenticate to GCP FIRST (WIF, no secrets), then call the action. For kubernetes
+# targets, also fetch cluster credentials so kubectl is authed (commented block below).
+#
+# Default is dry-run (plan only). Tick `apply` to make changes.
+# NOTE: for production, pin the third-party actions below to a commit SHA (not @vN).
+
+on:
+  workflow_dispatch:
+    inputs:
+      project:
+        description: 'Project (folder under projects/)'
+        type: string
+        required: true
+      apply:
+        description: 'Apply changes (unticked = dry-run / plan only)'
+        type: boolean
+        default: false
+      prune:
+        description: 'Prune (SUBTRACTIVE): remove bindings/objects config no longer declares'
+        type: boolean
+        default: false
+      only:
+        description: 'Single subsystem/pruner (blank = all)'
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+  id-token: write        # required for keyless WIF auth
+
+concurrency:
+  group: provision-${{ inputs.project }}
+  cancel-in-progress: false
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Derive WIF provider + SA from config
+        id: wif
+        run: |
+          CFG="projects/${{ inputs.project }}/config.yaml"
+          test -f "$CFG" || { echo "::error::missing $CFG"; exit 1; }
+          # Adjust pool/provider/SA names to your anchor (bootstrap/anchor.sh or fleet-anchor.sh).
+          python3 - "$CFG" <<'PY' >> "$GITHUB_OUTPUT"
+          import sys, yaml
+          doc = yaml.safe_load(open(sys.argv[1]))
+          gcp = next((t for t in doc.get("targets", [doc]) if t.get("kind", "gcp") == "gcp"), doc)
+          p = gcp["project"]
+          num, pid = p["gcp_number"], p["gcp_id"]
+          pool, prov = "jgd-provisioner-pool", "jgd-provisioner"
+          print(f"provider=projects/{num}/locations/global/workloadIdentityPools/{pool}/providers/{prov}")
+          print(f"sa=infra-provisioner@{pid}.iam.gserviceaccount.com")
+          PY
+
+      - name: Authenticate to GCP via WIF
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ steps.wif.outputs.provider }}
+          service_account:            ${{ steps.wif.outputs.sa }}
+
+      - uses: google-github-actions/setup-gcloud@v3
+
+      # For kubernetes targets, uncomment and set your cluster so kubectl is authed:
+      # - run: gcloud container clusters get-credentials <cluster> --region <region> --project <gcp_id>
+
+      - name: Provision
+        uses: Just-Git-Dev/infra-provisioning-template@v1
+        with:
+          project: ${{ inputs.project }}
+          apply:   ${{ inputs.apply }}
+          prune:   ${{ inputs.prune }}
+          only:    ${{ inputs.only }}

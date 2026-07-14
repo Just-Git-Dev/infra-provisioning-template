@@ -1,0 +1,33 @@
+name: CI
+
+# Engine unit tests (gcloud/kubectl seams stubbed — no cloud access) + shell lint on the
+# bootstrap anchors. Keep this green: the engine mints cloud credentials, so a broken plan
+# is a real risk.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: python3 -m pip install --quiet pyyaml
+      - name: Engine tests
+        run: |
+          python3 tests/test_engine.py
+          python3 tests/test_kubernetes.py
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: shellcheck bootstrap scripts
+        run: shellcheck bootstrap/*.sh

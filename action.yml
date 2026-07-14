@@ -1,0 +1,56 @@
+name: 'JGD provisioning engine'
+description: >-
+  Config-driven access/identity + GKE tenancy provisioning. Runs the multi-provider
+  reconcile engine (gcp + kubernetes) against the CALLER'S projects/<key>/config.yaml.
+  Dry-run by default; set apply: true to make changes.
+author: 'Just-Git-Dev'
+
+# PREREQUISITE (caller does this BEFORE calling the action): authenticate to GCP
+# (e.g. google-github-actions/auth via WIF) so gcloud runs as the provisioner SA. For
+# kubernetes targets, also get cluster credentials (gcloud container clusters
+# get-credentials …) so kubectl is authed. This action only RUNS the engine.
+
+inputs:
+  project:
+    description: 'Project key — a folder under <config-root>/projects/'
+    required: true
+  apply:
+    description: 'Apply changes (default: dry-run / plan only)'
+    required: false
+    default: 'false'
+  prune:
+    description: 'Subtractive reconcile: remove bindings/objects config no longer declares'
+    required: false
+    default: 'false'
+  only:
+    description: 'Single subsystem/pruner (blank = all)'
+    required: false
+    default: ''
+  config-root:
+    description: 'Root holding projects/<key>/config.yaml (default: the caller workspace)'
+    required: false
+    default: ${{ github.workspace }}
+
+runs:
+  using: composite
+  steps:
+    - name: Ensure PyYAML
+      shell: bash
+      run: python3 -m pip install --quiet pyyaml
+
+    - name: Provision
+      shell: bash
+      env:
+        PROVISION_CONFIG_ROOT: ${{ inputs.config-root }}
+      run: |
+        set -eo pipefail
+        ARGS=()
+        [ "${{ inputs.apply }}" = "true" ] && ARGS+=(--apply)
+        [ "${{ inputs.prune }}" = "true" ] && ARGS+=(--prune)
+        [ -n "${{ inputs.only }}" ] && ARGS+=(--only "${{ inputs.only }}")
+        python3 "${{ github.action_path }}/engine/provision.py" "${{ inputs.project }}" "${ARGS[@]}" \
+          | tee "${GITHUB_STEP_SUMMARY:-/dev/stdout}"
+
+branding:
+  icon: 'lock'
+  color: 'blue'

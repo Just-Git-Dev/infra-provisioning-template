@@ -1,0 +1,65 @@
+# EXAMPLE project config — copy this folder to projects/<your-key>/ and edit.
+#
+# One folder per project (a project = a GitHub org + its GCP project, and optionally a
+# GKE namespace). The engine reads projects/<key>/config.yaml and reconciles it.
+#
+# This example shows BOTH provider targets. If you only need GCP access brokering, you can
+# drop the `targets:` wrapper entirely and put `project`/`service_accounts`/`wif` at the top
+# level — a bare config auto-wraps to a single `kind: gcp` target (backwards-compatible).
+
+targets:
+  # ── GCP: access / identity broker ──────────────────────────────────────────
+  - kind: gcp
+    project:
+      gcp_id:     your-gcp-project        # GCP project id
+      gcp_number: "000000000000"          # informational; engine re-resolves at runtime
+      github_org: YourOrg
+      region:     asia-southeast1
+
+    service_accounts:
+      - name: github-releaser
+        description: "CI releaser — build + deploy (owner: platform)"
+        roles: [artifactregistry.writer, run.developer]   # access the app-repo workflow needs
+        wif_repos: [YourOrg/api]                           # repos allowed to impersonate this SA
+        act_as: [your-app-run]                             # may deploy/run-as this runtime SA
+      - name: your-app-run                                 # runtime SA (no wif_repos / act_as)
+        description: "Runtime identity for the app"
+        roles: [cloudtrace.agent, logging.logWriter]
+
+    wif:
+      pool:     github-actions            # app-repo WIF pool (distinct from the anchor's jgd-*-pool)
+      provider: github                    # OIDC provider under that pool (org-scoped to github_org)
+
+  # ── Kubernetes: GKE tenancy + identity + exposure infra ──────────────────────
+  # Remove this whole target if you don't run on GKE. Applied AFTER gcp so a KSA's
+  # Workload-Identity reference to the GCP SA above resolves.
+  - kind: kubernetes
+    cluster: prod-gke                     # informational (fleet auth selects the kubeconfig context)
+    gcp_project: your-gcp-project         # Workload-Identity host project (for the WI principal string)
+    namespace: your-app
+    labels: { team: platform }
+    network_isolation: true               # → a default-deny-ingress NetworkPolicy baseline
+    quota:                                # → a ResourceQuota `<ns>-quota` (value-aware on these limits)
+      requests.cpu: "4"
+      requests.memory: 8Gi
+      limits.cpu: "8"
+      limits.memory: 16Gi
+    rbac:
+      roles:
+        - name: app-reader
+          rules: [{ apiGroups: [""], resources: [pods, services], verbs: [get, list, watch] }]
+      bindings:
+        - name: app-reader-binding
+          role: app-reader
+          subjects: [{ kind: ServiceAccount, name: your-app }]
+    service_accounts:                     # KSAs — both Workload-Identity halves (annotation + GCP grant)
+      - name: your-app
+        gcp_service_account: your-app-run@your-gcp-project.iam.gserviceaccount.com
+    # exposure infra (owns only objects that select the workload by label / by name from
+    # outside — never the Deployment/image, which stays in your CD)
+    service:     { name: your-app, port: 80, target_port: 8080, selector: { app: your-app } }
+    certificate: { name: your-app-tls, issuer: letsencrypt-prod, dns_names: [app.example.com] }
+    ingress:     { name: your-app, host: app.example.com, service: your-app,
+                   tls_secret: your-app-tls, external_dns: app.example.com, class: gce }
+    hpa:         { name: your-app, target: your-app, min: 2, max: 10, cpu: 70 }
+    pdb:         { name: your-app, min_available: 1, selector: { app: your-app } }

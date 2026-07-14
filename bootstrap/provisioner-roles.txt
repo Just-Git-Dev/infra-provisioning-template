@@ -1,0 +1,12 @@
+# Kept project IAM roles for the anchor-owned `infra-provisioner` SA.
+# SINGLE SOURCE OF TRUTH — read by both bootstrap/anchor.sh (grants these) and
+# engine/provision.py `--prune` (removes any provisioner role NOT listed here).
+#
+# Scope: access/identity broker only (service_accounts + wif handlers). The
+# provisioner GRANTS roles to app SAs via projectIamAdmin without HOLDING them, so
+# it needs only these three identity/IAM-admin roles — NO serviceusage/pubsub/
+# monitoring/logging/secrets. (Scope narrowed 2026-07-01; see DECISIONS + ADR-001.)
+# Comment lines (#) and blanks are ignored.
+roles/iam.serviceAccountAdmin
+roles/resourcemanager.projectIamAdmin
+roles/iam.workloadIdentityPoolAdmin
