@@ -110,8 +110,12 @@ def ensure_service_accounts(cfg, project):
         if gout(["iam", "service-accounts", "describe", email], project):
             c("ok", f"sa {email}")
         else:
+            # GCP displayName limit is 100 *bytes*, not chars: truncate on the byte
+            # string and drop any partial trailing multibyte char (else create fails
+            # with INVALID_ARGUMENT on descriptions containing e.g. an em-dash).
+            display_name = sa.get("description", name).encode("utf-8")[:100].decode("utf-8", "ignore")
             do(["iam", "service-accounts", "create", name,
-                f"--display-name={sa.get('description', name)[:100]}"], project, f"create sa {email}")
+                f"--display-name={display_name}"], project, f"create sa {email}")
         for role in sa.get("roles", []):
             role = role if role.startswith("roles/") else f"roles/{role}"
             if sa_has_role(project, email, role):

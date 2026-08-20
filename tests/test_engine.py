@@ -209,6 +209,54 @@ def test_provisioner_kept_roles_reads_shared_file():
     }
 
 
+# ── mutation-path regressions (ported from the infra-provisioning consumer) ──
+def _raise_on_call(stderr):
+    """0-arg callable that fails the way a real `gcloud` mutation does."""
+    import subprocess
+    def boom():
+        raise subprocess.CalledProcessError(1, ["gcloud"], stderr=stderr)
+    return boom
+
+
+def test_do_surfaces_gcloud_stderr_on_failure():
+    """A failed mutation must exit with gcloud's stderr, not swallow it — `read`
+    has been fail-loud since ADR-003; `do`/`undo` were not, so a rejected create
+    printed a bare traceback-free '+ create sa …' and moved on."""
+    core.DRY = False
+    try:
+        for op in (core.do, core.undo):
+            try:
+                op(_raise_on_call("ERROR: INVALID_ARGUMENT: display name too long"), "create sa x")
+                raise AssertionError(f"expected SystemExit from core.{op.__name__}")
+            except SystemExit as e:
+                assert "INVALID_ARGUMENT" in str(e), str(e)
+    finally:
+        core.DRY = True
+
+
+def test_service_account_display_name_truncated_by_bytes():
+    """GCP's displayName limit is 100 BYTES, not characters. Truncating the
+    description by character count let a multibyte description (e.g. an em-dash)
+    overflow, and `service-accounts create` failed with INVALID_ARGUMENT."""
+    desc = "\u2014" * 60                  # em-dash: 1 char, 3 bytes → 60 chars / 180 bytes
+    cfg = {"service_accounts": [{"name": "sa1", "description": desc, "roles": []}]}
+    seen = []
+    core.DRY = False
+    P.gout = lambda args, project=None: ""          # SA absent → take the create path
+    P.gcloud = lambda args, project=None, check=True: seen.append(args)
+    try:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            P.ensure_service_accounts(cfg, "p")
+    finally:
+        core.DRY = True
+    flag = next(a for a in seen[0] if a.startswith("--display-name="))
+    value = flag.split("=", 1)[1]
+    n = len(value.encode("utf-8"))
+    assert n <= 100, f"--display-name is {n} bytes, over GCP's 100-byte limit"
+    assert value == desc[:33], "expected 33 em-dashes (99 bytes); the 34th would overflow"
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0
