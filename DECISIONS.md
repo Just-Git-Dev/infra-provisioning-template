@@ -5,9 +5,38 @@ the alternatives were. Newest first.
 
 ## Index
 
+- [2026-08-20 — SHA-pin this repo's own actions and enforce it in CI](#2026-08-20--sha-pin-this-repos-own-actions-and-enforce-it-in-ci)
 - [2026-08-20 — port the two mutation-path engine fixes from the consumer; release v1.0.1](#2026-08-20--port-the-two-mutation-path-engine-fixes-from-the-consumer-release-v101)
 
 ---
+
+## 2026-08-20 — SHA-pin this repo's own actions and enforce it in CI
+
+**Context.** Both consumer repos (`infra-provisioning`, `reusable-workflows`) pin every
+third-party action to a full commit SHA and enforce it with a CI job that rejects any
+`uses: owner/repo@<non-40-hex>`. This repo did not — it used `actions/checkout@v5`,
+`actions/setup-python@v5`, `google-github-actions/auth@v3`, `setup-gcloud@v3`.
+
+**Why it matters more here than it looks.** This repo is now *on the supply chain* of every
+consumer that pins the action. A moved tag in **our** workflows is one more way to change what
+runs against **their** cloud — and the engine here mints cloud credentials and rewrites IAM.
+The exemption was never justified; it was just never noticed. Surfaced while dogfooding the
+action from `infra-provisioning` (that repo's TODO, 2026-08-20).
+
+**Decision.** Pin all seven references to full SHAs (verified against upstream's tag →
+commit mapping, and identical to what `infra-provisioning` already pins), and add the same
+`third-party actions are SHA-pinned` job so the rule is enforced rather than remembered.
+Also set `defaults.run.shell: bash` — GitHub's implicit default omits `pipefail`.
+
+**Including the scaffold's self-reference.** `.github/workflows/provision.yml` is the caller a
+new adopter copies via "Use this template", and its `uses:` pointed at our own `@v1`. Pinned to
+`b35575b…` (`v1.0.1`) too. A tag there would be *teaching* the mutable-ref habit to every
+adopter, and this repo has just demonstrated what a stale `@v1` costs: it sat three releases
+behind the code it was extracted from. Adopters bump the SHA and the trailing comment together.
+
+**Not done:** the `v1` alias still exists and still moves. It is the documented entry point in
+the README and removing it is a breaking change for anyone already pinned to it. The gate makes
+*our* references honest; consumers still have to choose a SHA.
 
 ## 2026-08-20 — port the two mutation-path engine fixes from the consumer; release v1.0.1
 
