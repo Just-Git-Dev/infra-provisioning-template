@@ -40,7 +40,10 @@ def do(run, describe):
     if DRY:
         c("dry", f"would {describe}")
         return
-    run()
+    try:
+        run()
+    except subprocess.CalledProcessError as e:
+        sys.exit(f"failed to {describe}:\n{(e.stderr or '').strip()}")
     c("add", describe)
 
 
@@ -49,7 +52,10 @@ def undo(run, describe):
     if DRY:
         c("dry", f"would {describe}")
         return
-    run()
+    try:
+        run()
+    except subprocess.CalledProcessError as e:
+        sys.exit(f"failed to {describe}:\n{(e.stderr or '').strip()}")
     c("del", describe)
 
 
