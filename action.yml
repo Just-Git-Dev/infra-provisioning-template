@@ -38,17 +38,28 @@ runs:
       shell: bash
       run: python3 -m pip install --quiet pyyaml
 
+    # Every caller-controlled value reaches the shell through `env:`, never through
+    # `${{ }}` interpolation into the script body. Interpolation splices the raw string
+    # into the program text before bash sees it, so a value containing a quote or `$(…)`
+    # becomes code — and these inputs come from workflow_dispatch, i.e. from whoever can
+    # click Run. This action runs as a provisioner SA with IAM-admin rights; the shape is
+    # not worth leaving in place even where today's values look safe. `github.action_path`
+    # stays interpolated: it is set by the runner, not by the caller.
     - name: Provision
       shell: bash
       env:
         PROVISION_CONFIG_ROOT: ${{ inputs.config-root }}
+        IN_PROJECT: ${{ inputs.project }}
+        IN_APPLY: ${{ inputs.apply }}
+        IN_PRUNE: ${{ inputs.prune }}
+        IN_ONLY: ${{ inputs.only }}
       run: |
         set -eo pipefail
         ARGS=()
-        [ "${{ inputs.apply }}" = "true" ] && ARGS+=(--apply)
-        [ "${{ inputs.prune }}" = "true" ] && ARGS+=(--prune)
-        [ -n "${{ inputs.only }}" ] && ARGS+=(--only "${{ inputs.only }}")
-        python3 "${{ github.action_path }}/engine/provision.py" "${{ inputs.project }}" "${ARGS[@]}" \
+        [ "$IN_APPLY" = "true" ] && ARGS+=(--apply)
+        [ "$IN_PRUNE" = "true" ] && ARGS+=(--prune)
+        [ -n "$IN_ONLY" ] && ARGS+=(--only "$IN_ONLY")
+        python3 "${{ github.action_path }}/engine/provision.py" "$IN_PROJECT" "${ARGS[@]}" \
           | tee "${GITHUB_STEP_SUMMARY:-/dev/stdout}"
 
 branding:
