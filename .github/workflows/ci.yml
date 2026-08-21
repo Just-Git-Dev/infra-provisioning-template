@@ -36,6 +36,22 @@ jobs:
       - name: shellcheck bootstrap scripts
         run: shellcheck bootstrap/*.sh
 
+      # `shellcheck bootstrap/*.sh` only ever looked at the anchors. actionlint bundles
+      # shellcheck over every `run:` body too — including this file's and, via the step
+      # below, the composite action's. A quoting bug in the step that invokes the engine
+      # has the same blast radius as one in a bootstrap script.
+      - uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2.2.0
+        with:
+          fail-on-error: true
+
+      # actionlint lints workflows; it does not read action.yml. The composite action
+      # this repo ships had nothing shellchecking its run: bodies at all.
+      - name: shellcheck the composite action
+        run: |
+          python3 -m pip install --quiet pyyaml
+          python3 scripts/extract_action_shell.py > action-steps.sh
+          shellcheck --shell=bash action-steps.sh
+
   # This repo is on the supply chain of every consumer that pins the action: a moved
   # tag in OUR workflows is one more way to change what runs against their cloud. Same
   # gate the consumer repos run.
@@ -48,8 +64,11 @@ jobs:
         run: |
           # Matches `uses: owner/repo@ref` where ref is not a 40-char hex SHA.
           # Local (`./...`) refs are excluded by `[^./]`.
+          # action.yml is scanned too: it is a composite action, so a `uses:` added
+          # there runs inside every consumer's provisioning job. Scanning only
+          # .github/workflows would leave the file this repo actually ships unguarded.
           if grep -rnP '^\s*(-\s*)?uses:\s*[^./][^@]+@(?![0-9a-f]{40}\s*($|#))' \
-               --include='*.yml' --include='*.yaml' .github/workflows; then
+               --include='*.yml' --include='*.yaml' .github/workflows action.yml; then
             echo "::error::Third-party actions must be pinned to a full commit SHA."
             exit 1
           fi

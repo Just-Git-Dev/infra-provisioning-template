@@ -5,8 +5,57 @@ the alternatives were. Newest first.
 
 ## Index
 
+- [2026-08-21 — caller inputs move to `env:`; CI grows actionlint and lints `action.yml` itself](#2026-08-21--caller-inputs-move-to-env-ci-grows-actionlint-and-lints-actionyml-itself)
 - [2026-08-20 — SHA-pin this repo's own actions and enforce it in CI](#2026-08-20--sha-pin-this-repos-own-actions-and-enforce-it-in-ci)
 - [2026-08-20 — port the two mutation-path engine fixes from the consumer; release v1.0.1](#2026-08-20--port-the-two-mutation-path-engine-fixes-from-the-consumer-release-v101)
+
+---
+
+## 2026-08-21 — caller inputs move to `env:`; CI grows actionlint and lints `action.yml` itself
+
+Found in an org-wide cleanup review of the four `Just-Git-Dev` repos.
+
+**`action.yml` spliced caller inputs into the shell.** The Provision step interpolated
+`${{ inputs.project }}`, `${{ inputs.apply }}`, `${{ inputs.prune }}` and
+`${{ inputs.only }}` directly into its `run:` body. GitHub expands `${{ }}` into the
+program *text* before bash parses it, so a value containing a quote or `$(…)` is code, not
+data. These inputs arrive from a consumer's `workflow_dispatch` — from whoever can click
+Run — and this action executes as their provisioner SA with IAM-admin rights. All four now
+arrive as `env:` vars, the way `config-root` already did. `github.action_path` stays
+interpolated: the runner sets it, not the caller.
+
+Nothing was exploitable today, and that is the point of doing it now. The fix is two lines
+per input and it removes the shape, so no future value has to be audited for it.
+
+**CI never lint-checked this repo's own shell.** The `shellcheck` job ran
+`shellcheck bootstrap/*.sh` — the two anchor scripts a human runs once — and nothing else.
+The `run:` bodies in `ci.yml` and, more importantly, in `action.yml` were unchecked. Added
+actionlint (SHA-pinned `raven-actions/actionlint@3d39aea`, matching the two consumer repos)
+for the workflows.
+
+`action.yml` needed its own step, because **actionlint lints workflows and does not read
+`action.yml`** — a composite action is the one file in a repo like this that is guaranteed
+to run in someone else's cloud, and it was the one file no linter looked at.
+`scripts/extract_action_shell.py` pulls the `run:` bodies into one script and shellchecks
+it. Two details it has to get right, both learned by hitting them: each body is wrapped in
+a subshell so one step's `set -e` does not leak into the next (the runner gives each step
+its own shell), and `${{ … }}` is replaced with a placeholder first — shellcheck reads it
+as a malformed parameter expansion and fails SC2296, which is exactly why actionlint
+substitutes expressions before it shellchecks a workflow body.
+
+**The pin gate now scans `action.yml` too.** It only looked at `.github/workflows`, so a
+`uses:` added to the composite action — the code that runs inside every consumer's
+provisioning job — would have been unguarded by the job whose whole purpose is guarding it.
+
+**Also in this pass:** `CODEOWNERS` and `.github/dependabot.yml` (both matching
+`reusable-workflows`; dependabot bumps a pinned SHA *and* its `# vX.Y.Z` comment, so pinning
+costs nothing to maintain), and an `AGENTS.md` — the org's convention, adopted here so the
+three repos stop each using a different filename for the same thing.
+
+**Repo settings changed alongside this, outside the diff:** `main` is now protected (PR
+required, the three CI jobs required, admins not exempt) — it had no protection at all while
+carrying a floating `v1` tag — and `v1.0.2` was cut so the `v1` alias points at a real semver
+tag rather than an untagged commit.
 
 ---
 
