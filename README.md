@@ -128,12 +128,22 @@ python3 tests/test_engine.py && python3 tests/test_kubernetes.py   # seams stubb
 `anchor.sh` (per-project) or `fleet-anchor.sh` (one SA reaches all projects) establish the
 keyless GitHub→GCP WIF path a human runs once with Owner. `provisioner-roles.txt` is the
 single source of truth for the provisioner's least-privilege roles (also read by `--prune`).
+A line carrying `{project}` names a **project-scoped custom role**: the anchor scripts create
+and reconcile it before granting, and `fleet-anchor.sh` skips it when granting at folder/org
+scope (a project-scoped role does not exist there — it is granted per-project instead).
 Edit the `PROVISIONER_REPO` / `PROJECTS` placeholders (or set `PROVISIONER_REPO` via env).
 
 ## Safety notes
 
 - **Least privilege:** the provisioner GRANTS roles to app SAs via `projectIamAdmin` without
-  holding them; it needs only the 3 identity/IAM-admin roles in `provisioner-roles.txt`.
+  holding them — 3 identity/IAM-admin roles in `provisioner-roles.txt`, plus one **custom**
+  role, `jgdSecretIamAdmin`, that `resource_roles.secrets` needs. `projectIamAdmin` confers
+  `setIamPolicy` on the **project**, not on a resource, so binding a role on a *secret* needs
+  `secretmanager.secrets.setIamPolicy` on that secret. It is a custom role and not
+  `roles/secretmanager.admin` deliberately: admin includes `versions.access`, which would let
+  the identity broker read every secret **payload** in the fleet. The custom role can neither
+  create, delete, nor read a secret — only manage who may access one. The anchor scripts create
+  and reconcile it.
 - **Keyless:** WIF/OIDC everywhere — no long-lived keys or secrets in a consumer repo.
 - **Pin third-party actions to a commit SHA** for production (the examples use `@vN` tags for
   readability). This engine mints cloud credentials — treat a moved tag as a supply-chain event.

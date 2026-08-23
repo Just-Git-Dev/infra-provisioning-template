@@ -5,11 +5,67 @@ the alternatives were. Newest first.
 
 ## Index
 
+- [2026-08-23 — the provisioner gets a custom role for secret IAM, because `projectIamAdmin` stops at the project](#2026-08-23--the-provisioner-gets-a-custom-role-for-secret-iam-because-projectiamadmin-stops-at-the-project)
 - [2026-08-23 — RCA: `prune_resource_roles` planned to tear down every `act_as` grant](#2026-08-23--rca-prune_resource_roles-planned-to-tear-down-every-act_as-grant)
 - [2026-08-23 — `resource_roles`: bind a role on one resource, because project scope was the only scope](#2026-08-23--resource_roles-bind-a-role-on-one-resource-because-project-scope-was-the-only-scope)
 - [2026-08-21 — caller inputs move to `env:`; CI grows actionlint and lints `action.yml` itself](#2026-08-21--caller-inputs-move-to-env-ci-grows-actionlint-and-lints-actionyml-itself)
 - [2026-08-20 — SHA-pin this repo's own actions and enforce it in CI](#2026-08-20--sha-pin-this-repos-own-actions-and-enforce-it-in-ci)
 - [2026-08-20 — port the two mutation-path engine fixes from the consumer; release v1.0.1](#2026-08-20--port-the-two-mutation-path-engine-fixes-from-the-consumer-release-v101)
+
+---
+
+## 2026-08-23 — the provisioner gets a custom role for secret IAM, because `projectIamAdmin` stops at the project
+
+Found the only way it could be: the **first real apply** of `resource_roles.secrets`, running as
+the provisioner SA in CI, failed `PERMISSION_DENIED` on `secretmanager.secrets.get`.
+
+**Problem.** This engine's central claim about the provisioner is that it *"GRANTS roles to app
+SAs via `projectIamAdmin` without HOLDING them"*. That is true — for **project-level** bindings,
+which need only `resourcemanager.projects.setIamPolicy`. It does not generalise to a resource.
+Binding a role on a **secret** needs `secretmanager.secrets.setIamPolicy` **on that secret**, and
+reading the policy first needs `secrets.get` / `secrets.getIamPolicy`. `projectIamAdmin` confers
+none of the three. So `resource_roles.secrets` shipped in v1.1.0 could be *declared* and *planned*
+but never *applied*.
+
+(`resource_roles.service_accounts` works untouched: `iam.serviceAccountAdmin`, already in the
+kept-set, includes `serviceAccounts.get`/`setIamPolicy`. The gap is specific to secrets.)
+
+**Why not `roles/secretmanager.admin`.** It includes `secretmanager.versions.access`. Granting it
+would let the identity broker — an SA that every consumer's CI can reach through WIF — read every
+secret **payload** in the fleet. That trades a provisioning convenience for the crown jewels. No
+predefined role offers `setIamPolicy` without payload access; this was checked against
+`includedPermissions`, not inferred from names.
+
+**Decision.** A project-scoped **custom role**, `jgdSecretIamAdmin`, with exactly three
+permissions — `secretmanager.secrets.get`, `.getIamPolicy`, `.setIamPolicy` — created and
+**reconciled** (not merely created) by the anchor scripts, which a human already runs once with
+Owner. It cannot create, delete, or read a secret; it can only manage who may access one.
+
+Not to be confused with `jgdSecretsProvisioner`, removed 2026-07-01 when this repo stopped
+creating secrets. That role created them. This one deliberately cannot.
+
+**Mechanism.** `provisioner-roles.txt` stays the single source of truth and gains a `{project}`
+placeholder: a line carrying it is a project-scoped custom role, substituted by both the shell
+and the engine. Three consequences fell out and are handled:
+
+- `fleet-anchor.sh` grants at folder/org scope too, where a project-scoped custom role **does not
+  exist**. Those grants are skipped there and made per-project instead.
+- `prune_provisioner` compares against the live policy, which reports custom roles as
+  `projects/<p>/roles/<id>`. Without substitution it would unbind the role the anchor had just
+  granted, on every run. `provisioner_kept_roles()` now takes the project.
+- `_qualify()` prefixed anything without a `roles/` prefix, so a custom role became
+  `roles/projects/...` — rejected by gcloud only at apply time. It now leaves any
+  `.../roles/...` alone, and the two open-coded copies of that logic were folded into it.
+
+**Tradeoff.** A custom role is one more object to reconcile, and it puts a *definition* in the
+anchor script rather than in config. That is the cost of least privilege here: the alternative is
+a predefined role that reads secret payloads. The permission set is reconciled on every anchor
+run, so adding a permission later reaches projects anchored earlier.
+
+**Verified.** 59 tests pass (3 new: the qualifier, the substitution, and a `prune_provisioner`
+guard proving the custom role survives a prune). `shellcheck` clean on both anchor scripts —
+including no `tr` set-vs-word trap, using `--format='value[delimiter=","]'` so the separator is
+deterministic rather than guessed (the SC2020 lesson of 2026-07-24).
 
 ---
 

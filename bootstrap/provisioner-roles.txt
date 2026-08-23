@@ -2,11 +2,31 @@
 # SINGLE SOURCE OF TRUTH — read by both bootstrap/anchor.sh (grants these) and
 # engine/provision.py `--prune` (removes any provisioner role NOT listed here).
 #
-# Scope: access/identity broker only (service_accounts + wif handlers). The
-# provisioner GRANTS roles to app SAs via projectIamAdmin without HOLDING them, so
-# it needs only these three identity/IAM-admin roles — NO serviceusage/pubsub/
-# monitoring/logging/secrets. (Scope narrowed 2026-07-01; see DECISIONS + ADR-001.)
+# Scope: access/identity broker only. The provisioner GRANTS roles to app SAs via
+# projectIamAdmin without HOLDING them — NO serviceusage/pubsub/monitoring/logging.
+# (Scope narrowed 2026-07-01; see DECISIONS + ADR-001.)
+#
+# `{project}` is substituted with the GCP project id, by BOTH the anchor scripts and
+# the engine. A line carrying it names a PROJECT-SCOPED custom role: it can only be
+# granted per-project, so fleet-anchor.sh skips it when granting at folder/org scope.
 # Comment lines (#) and blanks are ignored.
 roles/iam.serviceAccountAdmin
 roles/resourcemanager.projectIamAdmin
 roles/iam.workloadIdentityPoolAdmin
+
+# Resource-scoped IAM on secrets (resource_roles.secrets, ADR-005). projectIamAdmin
+# grants resourcemanager.projects.setIamPolicy, which is enough to bind roles AT THE
+# PROJECT — but setting IAM on a SECRET needs secretmanager.secrets.setIamPolicy on
+# that resource, which it does not confer. Without this the provisioner cannot even
+# `secrets describe`, and every resource_roles.secrets apply fails PERMISSION_DENIED.
+#
+# Why a CUSTOM role and not roles/secretmanager.admin: admin includes
+# secretmanager.versions.access. Granting it would let the identity broker read every
+# secret PAYLOAD in the fleet. No predefined role has setIamPolicy without payload
+# access, so the least-privilege answer is three permissions and no more. The role is
+# created/reconciled by the anchor scripts (a human with Owner, one-time).
+#
+# NOT to be confused with the `jgdSecretsProvisioner` role removed 2026-07-01 — that
+# one CREATED secrets. This one cannot create, delete, or read one; it only manages
+# who may access them.
+projects/{project}/roles/jgdSecretIamAdmin

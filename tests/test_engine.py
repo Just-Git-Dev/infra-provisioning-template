@@ -205,10 +205,11 @@ def test_prune_provisioner_keeps_kept_removes_rest():
 
 
 def test_provisioner_kept_roles_reads_shared_file():
-    assert P.provisioner_kept_roles() == {
+    assert P.provisioner_kept_roles("p") == {
         "roles/iam.serviceAccountAdmin",
         "roles/resourcemanager.projectIamAdmin",
         "roles/iam.workloadIdentityPoolAdmin",
+        "projects/p/roles/jgdSecretIamAdmin",
     }
 
 
@@ -406,3 +407,33 @@ def test_prune_resource_roles_still_removes_deleted_holder_of_a_foreign_role():
     out = drive(P.prune_resource_roles, cfg, lambda args: live)
     assert ("would unbind roles/iam.serviceAccountUser on service account api-run "
             "from old-releaser (deleted)") in out
+
+
+def test_qualify_leaves_custom_roles_alone():
+    """A custom role is already fully qualified. Prefixing it would produce
+    `roles/projects/...`, which gcloud rejects only at apply time."""
+    assert P._qualify("run.admin") == "roles/run.admin"
+    assert P._qualify("roles/run.admin") == "roles/run.admin"
+    assert P._qualify("projects/p/roles/jgdSecretIamAdmin") == "projects/p/roles/jgdSecretIamAdmin"
+    assert P._qualify("organizations/1/roles/x") == "organizations/1/roles/x"
+
+
+def test_provisioner_kept_roles_substitutes_the_project():
+    """`{project}` marks a project-scoped custom role — the provisioner needs one to set IAM
+    on a secret, since projectIamAdmin confers setIamPolicy on the PROJECT, not on a resource."""
+    keep = P.provisioner_kept_roles("auto-mahn")
+    assert "projects/auto-mahn/roles/jgdSecretIamAdmin" in keep
+    assert not any("{project}" in r for r in keep)
+    assert "roles/resourcemanager.projectIamAdmin" in keep
+
+
+def test_prune_provisioner_keeps_the_custom_secret_role():
+    """Live policy reports a custom role as `projects/<p>/roles/<id>`. If the kept-set did not
+    substitute, prune would unbind the very role the anchor just granted — every run."""
+    out = drive(P.prune_provisioner, {},
+                lambda args: ("roles/resourcemanager.projectIamAdmin\n"
+                              "projects/p/roles/jgdSecretIamAdmin\n"
+                              "roles/editor"),
+                project="p")
+    assert "keep projects/p/roles/jgdSecretIamAdmin" in out
+    assert "would unbind roles/editor" in out
