@@ -85,12 +85,18 @@ DRY_RUN="${DRY_RUN:-0}"
 ACCOUNT="${ACCOUNT:-}"
 GAUTH=(); [ -n "$ACCOUNT" ] && GAUTH=(--account="$ACCOUNT")
 
+exec 3>&1   # see do_or_dry: dry-run notes go here so `>/dev/null` cannot eat them
+
 # ── helpers ─────────────────────────────────────────────────────────────────
 ok(){  printf '  \033[32m✓\033[0m %s\n' "$*"; }
-add(){ printf '  \033[33m+\033[0m %s\n' "$*"; }
+# A `+` means "changed it". In dry-run nothing changed, and do_or_dry has already
+# printed the `~ would:` line, so claiming an add here would be a lie (fixed 2026-08-23).
+add(){ [ "$DRY_RUN" = "1" ] && return 0; printf '  \033[33m+\033[0m %s\n' "$*"; }
 err(){ printf '  \033[31m✗\033[0m %s\n' "$*" >&2; }
 # run a real argv (correct quoting); in dry-run just print it
-do_or_dry(){ if [ "$DRY_RUN" = "1" ]; then printf '  \033[36m~\033[0m would: %s\n' "$*"; else "$@"; fi; }
+# ...on fd 3, not stdout: call sites redirect gcloud's chatter with `>/dev/null`, and that
+# redirect applies to the whole do_or_dry call — it used to swallow this announcement too.
+do_or_dry(){ if [ "$DRY_RUN" = "1" ]; then printf '  \033[36m~\033[0m would: %s\n' "$*" >&3; else "$@"; fi; }
 g(){ gcloud ${GAUTH[@]+"${GAUTH[@]}"} "$@"; }
 
 command -v gcloud >/dev/null || { err "gcloud not on PATH"; exit 1; }
