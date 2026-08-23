@@ -28,6 +28,7 @@ jobs:
         run: |
           python3 tests/test_engine.py
           python3 tests/test_kubernetes.py
+          python3 tests/test_anchor.py    # bootstrap anchors, gcloud stubbed on PATH
 
   shellcheck:
     runs-on: ubuntu-latest

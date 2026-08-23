@@ -5,12 +5,54 @@ the alternatives were. Newest first.
 
 ## Index
 
+- [2026-08-23 — RCA: a dry-run anchor printed `+`, so it read as if it had changed something](#2026-08-23--rca-a-dry-run-anchor-printed--so-it-read-as-if-it-had-changed-something)
 - [2026-08-23 — the provisioner gets a custom role for secret IAM, because `projectIamAdmin` stops at the project](#2026-08-23--the-provisioner-gets-a-custom-role-for-secret-iam-because-projectiamadmin-stops-at-the-project)
 - [2026-08-23 — RCA: `prune_resource_roles` planned to tear down every `act_as` grant](#2026-08-23--rca-prune_resource_roles-planned-to-tear-down-every-act_as-grant)
 - [2026-08-23 — `resource_roles`: bind a role on one resource, because project scope was the only scope](#2026-08-23--resource_roles-bind-a-role-on-one-resource-because-project-scope-was-the-only-scope)
 - [2026-08-21 — caller inputs move to `env:`; CI grows actionlint and lints `action.yml` itself](#2026-08-21--caller-inputs-move-to-env-ci-grows-actionlint-and-lints-actionyml-itself)
 - [2026-08-20 — SHA-pin this repo's own actions and enforce it in CI](#2026-08-20--sha-pin-this-repos-own-actions-and-enforce-it-in-ci)
 - [2026-08-20 — port the two mutation-path engine fixes from the consumer; release v1.0.1](#2026-08-20--port-the-two-mutation-path-engine-fixes-from-the-consumer-release-v101)
+
+---
+
+## 2026-08-23 — RCA: a dry-run anchor printed `+`, so it read as if it had changed something
+
+**Symptom.** `DRY_RUN=1 ./anchor.sh` printed 14 yellow `+` lines — the same vocabulary a real
+run uses for "created it" — and printed **no** `~ would:` line for the `jgdSecretIamAdmin`
+custom role or the WIF impersonation binding. The operator's one pre-flight check before a
+fleet-wide IAM change read as a run that had already mutated, while silently omitting two of
+the things it was about to do. Found while reviewing the v1.2.0 custom-role work; the defect
+is older than that work and affects both `anchor.sh` and `fleet-anchor.sh`.
+
+**Root cause.** Two independent mistakes, both from treating `do_or_dry` as if the dry-run
+gate lived inside the *call site* rather than inside the *helper*:
+
+1. `do_or_dry ... >/dev/null && add "…"` — the `>/dev/null` belongs to the whole `do_or_dry`
+   invocation, not to the `gcloud` inside it. It was there to swallow gcloud's chatter on a
+   real run; in dry-run there is no gcloud, and the only thing on stdout is the `~ would:`
+   announcement, so the redirect ate exactly the line it must not.
+2. `add` was unconditional. `do_or_dry` returns 0 in dry-run (nothing ran, nothing failed),
+   so `&& add` always fired — and the four call sites that put `add` on its own line never
+   consulted `DRY_RUN` at all.
+
+**Why it wasn't caught.** The bootstrap scripts had **no behavioural test** — CI ran
+`shellcheck bootstrap/*.sh`, which checks that the shell is well-formed, not that a dry run
+tells the truth. Both symptoms are visible only by *running* the script, and running it
+appeared to need GCP access, so nobody did. And the failure is a silent lie rather than an
+error: every dry run "worked".
+
+**Fix.** The gate moves entirely into the two helpers. The script saves its own stdout as
+fd 3 (`exec 3>&1`) and `do_or_dry` prints its `~ would:` line there, so no call site's
+redirect can hide it; `add` returns early when `DRY_RUN=1`, since `do_or_dry` has already
+announced the intent. No call site changed — which is the point: 20-odd sites cannot each be
+relied on to remember the rule.
+
+**Prevention.** `tests/test_anchor.py` runs **both** anchors end-to-end with a stub `gcloud`
+on `PATH` that answers every read as "absent", and asserts: no `+` in dry-run, a `~ would:`
+line for each of the two previously-swallowed operations, zero gcloud mutations in dry-run —
+and, so the guard cannot swing the other way, that a real run *does* still print `+` and
+*does* mutate. Wired into CI's engine-test job. The stub also removes the "you need GCP to
+run it" excuse: these scripts are now testable like any other code.
 
 ---
 
