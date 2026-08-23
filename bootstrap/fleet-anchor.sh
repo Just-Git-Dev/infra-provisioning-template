@@ -132,6 +132,48 @@ echo "Reach mode      : $REACH${FOLDER_ID:+ (folder $FOLDER_ID)}${ORG_ID:+ (org 
 [ "$DRY_RUN" = "1" ] && echo "MODE            : DRY-RUN (validate only, no changes)"
 
 # ── idempotent binding checks (per scope) ────────────────────────────────────
+
+# ── project-scoped custom roles ─────────────────────────────────────────────
+# A line in provisioner-roles.txt carrying `{project}` names a PROJECT-SCOPED custom
+# role. It must exist before it can be granted, and it is reconciled (not just created)
+# so a permission added to CUSTOM_ROLE_PERMS below reaches projects anchored earlier.
+#
+# Only jgdSecretIamAdmin is defined today: the three permissions the engine needs to
+# manage IAM ON a secret (resource_roles.secrets, ADR-005). Deliberately NOT
+# roles/secretmanager.admin — that includes secretmanager.versions.access, which would
+# let the identity broker read every secret payload in the fleet.
+ensure_custom_role(){ # proj role_id
+  local proj="$1" id="$2" perms title desc live want
+  case "$id" in
+    jgdSecretIamAdmin)
+      # Exactly what the engine needs to manage IAM ON a secret, and nothing more.
+      perms="secretmanager.secrets.get,secretmanager.secrets.getIamPolicy,secretmanager.secrets.setIamPolicy"
+      title="JGD Secret IAM Admin"
+      desc="Manage WHO may access a secret. Cannot create, delete, or read one (no versions.access). Held by infra-provisioner so resource_roles.secrets can bind."
+      ;;
+    *)
+      err "provisioner-roles.txt names custom role '$id', which this script does not define"
+      return 1
+      ;;
+  esac
+  # A deleted-but-not-purged role still describes (GCP keeps it ~7 days); an update on one
+  # fails loud, which is the right outcome — undelete is a human decision, not a script's.
+  live="$(g iam roles describe "$id" --project="$proj" \
+            --format='value[delimiter=","](includedPermissions)' 2>/dev/null || true)"
+  want="$(printf '%s' "$perms" | tr ',' '\n' | sort | tr '\n' ' ')"
+  if [ -z "$live" ]; then
+    do_or_dry g iam roles create "$id" --project="$proj" --title="$title" \
+      --description="$desc" --permissions="$perms" --stage=GA >/dev/null && add "custom role $id"
+  elif [ "$(printf '%s' "$live" | tr ',' '\n' | sort | tr '\n' ' ')" != "$want" ]; then
+    # Reconcile: the role exists but its permissions have drifted from this definition.
+    do_or_dry g iam roles update "$id" --project="$proj" --title="$title" \
+      --description="$desc" --permissions="$perms" --stage=GA >/dev/null \
+      && add "custom role $id (permissions synced)"
+  else
+    ok "custom role $id"
+  fi
+}
+
 project_has_role(){ # proj role member
   g projects get-iam-policy "$1" --flatten='bindings[].members' \
     --filter="bindings.role=$2 AND bindings.members=$3" \
@@ -228,7 +270,13 @@ grant_project(){ # key
     return 1
   fi
   ensure_apis "$proj"
+  local role_id
   for role in "${PROVISIONER_ROLES[@]}"; do
+    if [ "${role#*\{project\}}" != "$role" ]; then
+      role_id="${role##*/}"
+      ensure_custom_role "$proj" "$role_id" || return 1
+      role="${role//\{project\}/$proj}"
+    fi
     if project_has_role "$proj" "$role" "serviceAccount:$FLEET_SA"; then ok "role $role"
     else do_or_dry g projects add-iam-policy-binding "$proj" \
            --member="serviceAccount:$FLEET_SA" --role="$role" --condition=None >/dev/null && add "role $role"; fi
@@ -240,6 +288,12 @@ grant_scope(){ # kind id  (folder|org)
   echo ""
   echo "──────────── reach: $kind $id (inherited by all projects under it) ────────────"
   for role in "${PROVISIONER_ROLES[@]}"; do
+    # A project-scoped custom role cannot be granted at folder/org scope — it does not
+    # exist there. Those are granted per-project by grant_project instead.
+    if [ "${role#*\{project\}}" != "$role" ]; then
+      ok "skip $role (project-scoped custom role — granted per-project)"
+      continue
+    fi
     if [ "$kind" = folder ]; then
       if folder_has_role "$id" "$role" "serviceAccount:$FLEET_SA"; then ok "role $role"; else
         do_or_dry g resource-manager folders add-iam-policy-binding "$id" \

@@ -93,15 +93,22 @@ def sa_user_members(project, email):
 PROVISIONER_SA = "infra-provisioner"   # anchor-owned SA (not declared in configs)
 
 
-def provisioner_kept_roles():
-    """The provisioner's allowed roles — single source of truth shared with anchor.sh."""
+def provisioner_kept_roles(project=None):
+    """The provisioner's allowed roles — single source of truth shared with anchor.sh.
+
+    `{project}` in a line marks a PROJECT-SCOPED custom role (e.g.
+    `projects/{project}/roles/jgdSecretIamAdmin`) and is substituted with the project id.
+    Called without a project the placeholder is left as-is, which is only useful for
+    inspection — never for a live comparison."""
     path = os.path.join(core.ROOT, "bootstrap", "provisioner-roles.txt")
     roles = set()
     with open(path) as fh:
         for line in fh:
             line = line.split("#", 1)[0].strip()
             if line:
-                roles.add(line if line.startswith("roles/") else f"roles/{line}")
+                if project:
+                    line = line.replace("{project}", project)
+                roles.add(_qualify(line))
     return roles
 
 
@@ -120,7 +127,7 @@ def ensure_service_accounts(cfg, project):
             do(["iam", "service-accounts", "create", name,
                 f"--display-name={display_name}"], project, f"create sa {email}")
         for role in sa.get("roles", []):
-            role = role if role.startswith("roles/") else f"roles/{role}"
+            role = _qualify(role)
             if sa_has_role(project, email, role):
                 c("ok", f"  role {role}")
             else:
@@ -236,7 +243,11 @@ _FOREIGN_ROLES = {
 
 
 def _qualify(role):
-    return role if role.startswith("roles/") else f"roles/{role}"
+    """`run.admin` -> `roles/run.admin`. A fully-qualified role — predefined (`roles/x`) or a
+    custom one (`projects/<p>/roles/x`, `organizations/<o>/roles/x`) — is left alone; prefixing
+    a custom role would silently produce `roles/projects/...`, which gcloud rejects only at
+    apply time."""
+    return role if role.startswith("roles/") or "/roles/" in role else f"roles/{role}"
 
 
 def _declared_resource_roles(cfg, project):
@@ -363,7 +374,7 @@ def prune_service_accounts(cfg, project):
     print("prune service_accounts:")
     for sa in cfg.get("service_accounts", []):
         name, email = sa["name"], sa_email(sa["name"], project)
-        want = {(r if r.startswith("roles/") else f"roles/{r}") for r in sa.get("roles", [])}
+        want = {_qualify(r) for r in sa.get("roles", [])}
         live = sa_project_roles(project, email)
         extra = [r for r in live if r not in want]
         if not extra:
@@ -379,7 +390,7 @@ def prune_provisioner(cfg, project):
     so the SA never removes its own ability to finish the prune."""
     print("prune provisioner SA:")
     email = sa_email(PROVISIONER_SA, project)
-    keep = provisioner_kept_roles()
+    keep = provisioner_kept_roles(project)
     live = sa_project_roles(project, email)
     if not live:
         c("skip", f"{PROVISIONER_SA}: no readable roles (need projectIamAdmin to prune)")
