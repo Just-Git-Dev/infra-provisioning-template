@@ -22,6 +22,17 @@ targets:
         roles: [artifactregistry.writer, run.developer]   # access the app-repo workflow needs
         wif_repos: [YourOrg/api]                           # repos allowed to impersonate this SA
         act_as: [your-app-run]                             # may deploy/run-as this runtime SA
+      - name: ci-rotator
+        description: "CI ops — rolls the service, rotates its secret (owner: platform)"
+        roles: [run.admin]                                 # project-scope: needed everywhere
+        resource_roles:                                    # resource-scope: least privilege
+          service_accounts:
+            your-app-run: [iam.serviceAccountAdmin]        # setIamPolicy on THAT SA only
+          secrets:
+            your-app-env: [secretmanager.admin]            # manage THAT secret's versions only
+        # The engine BINDS on these resources; it never creates them (they are app-owned —
+        # an absent one fails loud). Without this block such grants live only in the live
+        # policy: invisible to the plan, unprunable, and not covered by "zero drift".
       - name: your-app-run                                 # runtime SA (no wif_repos / act_as)
         description: "Runtime identity for the app"
         roles: [cloudtrace.agent, logging.logWriter]

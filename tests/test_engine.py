@@ -94,9 +94,12 @@ def test_wif_skipped_when_no_pool():
 
 
 def test_handlers_are_access_only():
-    # Guard the scope: only the three access subsystems are registered.
-    assert set(P.HANDLERS) == {"service_accounts", "act_as", "wif"}
-    assert set(P.PRUNERS) == {"service_accounts", "act_as", "provisioner"}
+    # Guard the scope: ONLY access subsystems are registered — no resource CRUD ever.
+    # `resource_roles` (2026-08-23) binds roles on a single resource; it still grants
+    # access and never creates a resource, so the scope line is unmoved. Adding an
+    # entry here is a scope decision — it needs a DECISIONS entry, not just a commit.
+    assert set(P.HANDLERS) == {"service_accounts", "act_as", "resource_roles", "wif"}
+    assert set(P.PRUNERS) == {"service_accounts", "act_as", "resource_roles", "provisioner"}
 
 
 # ── act_as (SA→SA impersonation) ─────────────────────────────────────────────
@@ -269,3 +272,102 @@ if __name__ == "__main__":
             print(f"FAIL {fn.__name__}: {e}")
     print(f"\n{len(fns)-failed}/{len(fns)} passed")
     sys.exit(1 if failed else 0)
+
+
+# ── resource_roles: resource-scoped IAM (ADR-005) ────────────────────────────
+# The gap these close: the provider bound roles at PROJECT scope only, so a grant on a
+# single secret or a single SA was invisible to the plan and unprunable — "zero drift"
+# asserted nothing about it. `act_as` was already a resource-scoped binding; this
+# generalises that shape to arbitrary (kind, resource, role) triples.
+
+def test_resource_roles_secret_present_vs_missing():
+    cfg = {"service_accounts": [{
+        "name": "rotator",
+        "resource_roles": {"secrets": {"app-secrets": ["secretmanager.admin",
+                                                       "secretmanager.viewer"]}},
+    }]}
+
+    def gmap(args):
+        if "describe" in args:
+            return "exists"                                  # the secret exists
+        # one policy read per resource (not one per role); admin bound, viewer missing
+        return "roles/secretmanager.admin,serviceAccount:rotator@p.iam.gserviceaccount.com"
+
+    out = drive(P.ensure_resource_roles, cfg, gmap)
+    assert "✓   secret app-secrets: roles/secretmanager.admin" in out
+    assert "would   bind roles/secretmanager.viewer on secret app-secrets → rotator" in out
+
+
+def test_resource_roles_service_account_scope():
+    """The narrowing case: serviceAccountAdmin on ONE SA instead of project-wide."""
+    cfg = {"service_accounts": [{
+        "name": "rotator",
+        "resource_roles": {"service_accounts": {"api-run": ["iam.serviceAccountAdmin"]}},
+    }]}
+    out = drive(P.ensure_resource_roles, cfg,
+                lambda args: "exists" if "describe" in args else "")
+    assert "would   bind roles/iam.serviceAccountAdmin on service account api-run → rotator" in out
+
+
+def test_resource_roles_absent_resource_fails_loud():
+    """We BIND on resources, never CREATE them — an absent target is real drift, and must
+    not be silently skipped (that would make a clean plan a lie)."""
+    cfg = {"service_accounts": [{
+        "name": "rotator",
+        "resource_roles": {"secrets": {"gone": ["secretmanager.admin"]}},
+    }]}
+    try:
+        drive(P.ensure_resource_roles, cfg, lambda args: "")
+    except SystemExit as e:
+        assert "gone" in str(e) and "app-owned" in str(e)
+    else:
+        raise AssertionError("expected a loud exit for an absent resource")
+
+
+def test_resource_roles_none_declared_skips():
+    out = drive(P.ensure_resource_roles, {"service_accounts": [{"name": "sa1"}]},
+                lambda args: "exists")
+    assert "no resource_roles declared" in out
+
+
+def test_prune_resource_roles_removes_undeclared_owned_sa():
+    cfg = {"service_accounts": [
+        {"name": "rotator", "resource_roles": {"secrets": {"app-secrets": ["secretmanager.admin"]}}},
+        {"name": "api-run"},
+    ]}
+    # live policy on app-secrets: rotator/admin (declared, keep), api-run/accessor (owned but
+    # NOT declared → prune), a human and a foreign SA (unmanaged → never touched)
+    # exactly the shape real gcloud emits, verified against auto-mahn's app-secrets:
+    #   --flatten='bindings[].members' --format='csv[no-heading](bindings.role,bindings.members)'
+    live = ("roles/secretmanager.admin,serviceAccount:rotator@p.iam.gserviceaccount.com\n"
+            "roles/secretmanager.secretAccessor,serviceAccount:api-run@p.iam.gserviceaccount.com\n"
+            "roles/secretmanager.viewer,user:someone@example.com\n"
+            "roles/secretmanager.viewer,serviceAccount:other@elsewhere.iam.gserviceaccount.com")
+    out = drive(P.prune_resource_roles, cfg, lambda args: live)
+    assert "would unbind roles/secretmanager.secretAccessor on secret app-secrets from api-run" in out
+    assert "secretmanager.admin" not in out.split("would unbind")[-1]   # declared → kept
+    assert "someone@example.com" not in out                            # human → untouched
+    assert "other@elsewhere" not in out                                # foreign SA → untouched
+
+
+def test_prune_resource_roles_removes_deleted_principal():
+    """A `deleted:` member references a principal that no longer exists — it can never be a
+    legitimate grant, so it is pruned even though it is not an SA this config declares."""
+    cfg = {"service_accounts": [{"name": "rotator",
+                                 "resource_roles": {"secrets": {"app-secrets": []}}}]}
+    live = ("roles/secretmanager.secretAccessor,deleted:serviceAccount:"
+            "old-name@p.iam.gserviceaccount.com?uid=117781001628895155170")
+    out = drive(P.prune_resource_roles, cfg, lambda args: live)
+    assert "would unbind roles/secretmanager.secretAccessor on secret app-secrets from old-name" in out
+
+
+def test_prune_resource_roles_nothing_to_do():
+    cfg = {"service_accounts": [{"name": "rotator",
+                                 "resource_roles": {"secrets": {"app-secrets": ["secretmanager.admin"]}}}]}
+    live = "roles/secretmanager.admin,serviceAccount:rotator@p.iam.gserviceaccount.com"
+    out = drive(P.prune_resource_roles, cfg, lambda args: live)
+    assert "no extra resource_roles bindings" in out
+
+
+def test_resource_roles_registered_in_both_registries():
+    assert "resource_roles" in P.HANDLERS and "resource_roles" in P.PRUNERS

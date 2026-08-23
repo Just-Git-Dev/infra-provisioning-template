@@ -18,7 +18,7 @@ Two providers, selected per-target via a `kind` discriminator in `config.yaml`:
 
 | Provider | Owns (access/identity + tenancy — NOT workloads) |
 |---|---|
-| **gcp** | service accounts + their project IAM roles (`service_accounts`), SA→SA impersonation (`act_as`), app-repo Workload-Identity Federation (`wif`) |
+| **gcp** | service accounts + their project IAM roles (`service_accounts`), SA→SA impersonation (`act_as`), **roles scoped to a single resource** (`resource_roles`), app-repo Workload-Identity Federation (`wif`) |
 | **kubernetes** | Namespace, ResourceQuota, NetworkPolicy, RBAC, KSA + Workload-Identity (`namespace`/`quota`/`network_policy`/`rbac`/`ksa`); and standing exposure infra — Service, Certificate, Ingress, HPA, PDB |
 
 **Deliberately not owned:** the Deployment/workload + image (your CD owns those) and
@@ -82,6 +82,29 @@ See the fully-worked [`projects/EXAMPLE/config.yaml`](projects/EXAMPLE/config.ya
 config (no `targets:` key) auto-wraps to a single `kind: gcp` target, so GCP-only users can
 skip the wrapper. Explicit `targets:` mix `gcp` + `kubernetes`, applied **gcp-first** so a
 KSA's Workload-Identity reference to a GCP SA resolves.
+
+### `resource_roles` — bind a role on ONE resource, not the whole project
+
+`roles:` grants at **project** scope. When an SA needs a permission on exactly one secret or
+one other service account, a project role is far more than it needs — and until this existed,
+the resource-scoped grant people reached for instead was invisible to the engine: not in the
+plan, not prunable, and **not covered by "zero drift"**.
+
+```yaml
+service_accounts:
+  - name: ci-rotator
+    roles: [run.admin]                      # project-scope
+    resource_roles:                         # resource-scope
+      service_accounts: { app-run: [iam.serviceAccountAdmin] }
+      secrets:          { app-env: [secretmanager.admin] }
+```
+
+Supported kinds: `service_accounts` and `secrets`. The engine **binds** on these resources and
+never creates them — a resource that does not exist fails loud rather than being skipped,
+because a silent skip would make a clean plan a lie. `--prune` removes undeclared bindings
+**only from the resources your config names**, and only for members that are SAs the config
+declares, plus `deleted:` principals (residue an SA rename leaves behind — never a real grant).
+Humans, Google-managed service agents and SAs from other projects are never touched.
 
 ## The engine (`engine/`)
 

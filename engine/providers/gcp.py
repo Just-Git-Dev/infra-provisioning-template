@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """GCP provider — the ACCESS/IDENTITY broker for a Just-Git-Dev GCP project.
 
-Manages exactly three access subsystems (idempotent, plan-first):
+Manages exactly four access subsystems (idempotent, plan-first):
 
-  - service_accounts : the SAs we own + their project IAM roles
+  - service_accounts : the SAs we own + their PROJECT-scope IAM roles
   - act_as           : SA→SA impersonation (roles/iam.serviceAccountUser) between our SAs
+  - resource_roles   : roles bound on a SINGLE resource (a secret, one SA) instead of
+                       project-wide — the least-privilege alternative to a project role
   - wif              : the app-repo WIF pool/provider + per-SA impersonation bindings
 
 Everything else a project needs (enabling APIs, creating secrets, pub/sub topics,
 Cloud Monitoring alert policies) is a **resource** owned by the app repo itself,
-NOT by this provider. See DECISIONS 2026-07-01 (access-broker scope) and ADR-001.
+NOT by this provider. `resource_roles` does not weaken that line: it BINDS access on a
+resource, and fails loud rather than creating one that is missing. See DECISIONS 2026-07-01 (access-broker scope) and ADR-001.
 
 This module owns the `gcloud` seam (`gcloud` mutations / `gout` reads); the
 dry-run gate, fail-loud discipline, and printer live in `engine/core.py` (ADR-003).
@@ -190,9 +193,139 @@ def ensure_act_as(cfg, project):
         c("skip", "no act_as declared")
 
 
+# ── resource-scoped IAM (resource_roles) ─────────────────────────────────────
+# Roles bound ON A SINGLE RESOURCE rather than project-wide. This is still ACCESS, so it
+# belongs to the broker — and `act_as` was already exactly this shape (serviceAccountUser
+# ON one SA), so `resource_roles` generalises an existing pattern rather than adding a new
+# concept. The ownership line holds: we BIND on resources, we never CREATE them (an absent
+# target fails loud — see ensure_resource_roles).
+#
+# Why it exists: without it the provider could only bind at project scope, so real grants
+# on individual secrets and SAs were invisible to the plan AND unprunable. "Zero drift"
+# therefore asserted nothing about them, which is exactly how full-project roles get handed
+# out when a single-resource grant was what was needed. See ADR-005 / DECISIONS 2026-08-23.
+#
+# Declared on the SA that RECEIVES the access:
+#   resource_roles:
+#     service_accounts: { api-run: [iam.serviceAccountAdmin] }
+#     secrets:          { app-secrets: [secretmanager.admin] }
+_RESOURCE_KINDS = {
+    "secrets": {
+        "noun": "secret",
+        "ref": lambda name, project: name,
+        "args": lambda verb, ref, project: ["secrets", verb, ref, "--project", project],
+    },
+    "service_accounts": {
+        "noun": "service account",
+        "ref": lambda name, project: sa_email(name, project),
+        "args": lambda verb, ref, project: ["iam", "service-accounts", verb, ref, "--project", project],
+    },
+}
+
+
+def _qualify(role):
+    return role if role.startswith("roles/") else f"roles/{role}"
+
+
+def _declared_resource_roles(cfg, project):
+    """[(sa_name, kind, resource_name, ref, [qualified roles]), ...] in declaration order."""
+    out = []
+    for sa in cfg.get("service_accounts", []):
+        for kind, resources in (sa.get("resource_roles") or {}).items():
+            if kind not in _RESOURCE_KINDS:
+                raise SystemExit(f"unknown resource_roles kind {kind!r} on {sa['name']}; "
+                                 f"expected one of {sorted(_RESOURCE_KINDS)}")
+            spec = _RESOURCE_KINDS[kind]
+            for name, roles in (resources or {}).items():
+                out.append((sa["name"], kind, name, spec["ref"](name, project),
+                            [_qualify(r) for r in (roles or [])]))
+    return out
+
+
+def resource_policy(kind, ref, project):
+    """Live (role, member) pairs on one resource. Real gcloud emits
+    `roles/x,serviceAccount:y` per line under this flatten+csv pair."""
+    args = _RESOURCE_KINDS[kind]["args"]("get-iam-policy", ref, project) + [
+        "--flatten=bindings[].members",
+        "--format=csv[no-heading](bindings.role,bindings.members)"]
+    pairs = []
+    for line in gout(args).splitlines():
+        if "," in line:
+            role, member = line.split(",", 1)
+            pairs.append((role.strip(), member.strip()))
+    return pairs
+
+
+def ensure_resource_roles(cfg, project):
+    print("resource_roles:")
+    declared = _declared_resource_roles(cfg, project)
+    if not declared:
+        c("skip", "no resource_roles declared")
+        return
+    for sa_name, kind, name, ref, roles in declared:
+        spec = _RESOURCE_KINDS[kind]
+        member = f"serviceAccount:{sa_email(sa_name, project)}"
+        if not gout(spec["args"]("describe", ref, project)):
+            # Never auto-create: the resource is app-owned (ADR-001). Silently skipping
+            # would make a clean plan a lie about access that does not exist.
+            raise SystemExit(
+                f"resource_roles: {spec['noun']} {name!r} does not exist in {project}. "
+                f"It is app-owned — create it in the app repo's own bootstrap/ops workflow, "
+                f"then re-run. This provider binds on resources, it never creates them.")
+        held = {r for r, m in resource_policy(kind, ref, project) if m == member}
+        for role in roles:
+            if role in held:
+                c("ok", f"  {spec['noun']} {name}: {role}")
+            else:
+                do(spec["args"]("add-iam-policy-binding", ref, project) +
+                   [f"--member={member}", f"--role={role}"],
+                   project, f"  bind {role} on {spec['noun']} {name} → {sa_name}")
+
+
+def prune_resource_roles(cfg, project):
+    """Remove undeclared bindings from the resources config NAMES — and only those resources,
+    so blast radius is bounded by the config rather than by everything in the project.
+
+    Conservative, same rule as prune_act_as: a member is only ever touched if it is a service
+    account THIS config declares. The one addition is `deleted:` principals, which reference an
+    identity that no longer exists and so can never be a legitimate grant (they are the residue
+    an SA rename leaves behind). Humans, Google-managed service agents and SAs from other
+    projects are never touched."""
+    print("prune resource_roles:")
+    declared = _declared_resource_roles(cfg, project)
+    if not declared:
+        c("skip", "no resource_roles declared")
+        return
+    owned = {sa_email(sa["name"], project) for sa in cfg.get("service_accounts", [])}
+    wanted = {(kind, name, role, f"serviceAccount:{sa_email(sa_name, project)}")
+              for sa_name, kind, name, _ref, roles in declared for role in roles}
+    seen, extra = set(), False
+    for _sa_name, kind, name, ref, _roles in declared:
+        if (kind, name) in seen:          # a resource may be named by several SAs
+            continue
+        seen.add((kind, name))
+        spec = _RESOURCE_KINDS[kind]
+        for role, member in resource_policy(kind, ref, project):
+            deleted = member.startswith("deleted:")
+            email = member.split(":")[-1].split("?")[0]
+            if not deleted:
+                if not member.startswith("serviceAccount:") or email not in owned:
+                    continue                                   # unmanaged member → keep
+                if (kind, name, role, member) in wanted:
+                    continue                                   # declared → keep
+            extra = True
+            who = email.split("@")[0] + (" (deleted)" if deleted else "")
+            undo(spec["args"]("remove-iam-policy-binding", ref, project) +
+                 [f"--member={member}", f"--role={role}"],
+                 project, f"unbind {role} on {spec['noun']} {name} from {who}")
+    if not extra:
+        c("ok", "no extra resource_roles bindings")
+
+
 HANDLERS = {
     "service_accounts": ensure_service_accounts,
     "act_as": ensure_act_as,
+    "resource_roles": ensure_resource_roles,
     "wif": ensure_wif,
 }
 
@@ -272,6 +405,7 @@ def prune_act_as(cfg, project):
 PRUNERS = {
     "service_accounts": prune_service_accounts,
     "act_as": prune_act_as,
+    "resource_roles": prune_resource_roles,
     "provisioner": prune_provisioner,
 }
 
