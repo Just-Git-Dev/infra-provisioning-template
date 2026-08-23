@@ -5,10 +5,57 @@ the alternatives were. Newest first.
 
 ## Index
 
+- [2026-08-23 — RCA: `prune_resource_roles` planned to tear down every `act_as` grant](#2026-08-23--rca-prune_resource_roles-planned-to-tear-down-every-act_as-grant)
 - [2026-08-23 — `resource_roles`: bind a role on one resource, because project scope was the only scope](#2026-08-23--resource_roles-bind-a-role-on-one-resource-because-project-scope-was-the-only-scope)
 - [2026-08-21 — caller inputs move to `env:`; CI grows actionlint and lints `action.yml` itself](#2026-08-21--caller-inputs-move-to-env-ci-grows-actionlint-and-lints-actionyml-itself)
 - [2026-08-20 — SHA-pin this repo's own actions and enforce it in CI](#2026-08-20--sha-pin-this-repos-own-actions-and-enforce-it-in-ci)
 - [2026-08-20 — port the two mutation-path engine fixes from the consumer; release v1.0.1](#2026-08-20--port-the-two-mutation-path-engine-fixes-from-the-consumer-release-v101)
+
+---
+
+## 2026-08-23 — RCA: `prune_resource_roles` planned to tear down every `act_as` grant
+
+Found in the first dry-run of `resource_roles` against a live project, before any apply.
+
+**Symptom.** `provision.py automahn --prune` planned four unbinds where two were expected:
+
+```
+~ would unbind roles/iam.serviceAccountUser on service account api-run from github-releaser
+~ would unbind roles/iam.serviceAccountUser on service account api-run from github-rotator
+```
+
+Those two are the project's **`act_as` impersonation grants**. Applying that plan would have
+stopped both CI identities from deploying Cloud Run as the runtime SA — a live outage, from the
+pruner shipped one commit earlier.
+
+**Root cause.** `prune_resource_roles` treated *every* binding on a named resource as its own to
+reconcile. Its keep-rule was "is this member an SA this config declares, and is this exact
+(resource, role, member) triple declared under `resource_roles`?" An `act_as` grant satisfies the
+first half and fails the second — it is declared under `act_as:`, a different subsystem — so it
+read as undeclared drift. The `api-run` SA is both an `act_as` target and (now) a `resource_roles`
+resource, and nothing in the pruner knew the difference.
+
+**Why it wasn't caught.** Every unit test drove one subsystem in isolation against a hand-written
+policy fixture, and no fixture mixed subsystems: the `resource_roles` fixtures contained only
+`resource_roles` bindings. The bug lives exactly in the overlap, which is a shape the test data
+never had. `prune_act_as` had the mirror-image protection (it only touches serviceAccountUser)
+purely because it was written to do one role — the invariant was never stated, so the new pruner
+did not inherit it.
+
+**What did catch it:** running the dry-run against a real project before applying. Dry-run is
+accurate by construction here, so the plan showed the real bindings a fixture had never modelled.
+
+**Fix.** An explicit `_FOREIGN_ROLES` table: bindings whose (kind, role) belongs to another
+subsystem — `iam.serviceAccountUser` (act_as) and `iam.workloadIdentityUser` (wif) on
+`service_accounts` — are skipped by `prune_resource_roles`. `deleted:` principals are exempt from
+the exemption: no subsystem wants a dangling identity, and `prune_act_as` only ever touches
+members it owns, so nothing else would ever clear one.
+
+**Prevention.** Two regression tests, both red before the fix. One drives `prune_resource_roles`
+against a policy carrying act_as and wif bindings and asserts it plans nothing; the other asserts
+a `deleted:` holder of a foreign role IS still pruned, so the exemption cannot be widened into a
+leak. The invariant is now written down in the docstring: **a pruner reconciles only the bindings
+its own subsystem declares.** Any future pruner that names a shared resource inherits the rule.
 
 ---
 
