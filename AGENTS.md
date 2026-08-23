@@ -29,6 +29,11 @@ which pins a **full commit SHA**, not `@v1`.
 - **The engine only owns objects it can drift-detect honestly.** That is why it provisions
   Namespace/RBAC/KSA/Service/Ingress but *not* the Deployment or ConfigMap/Secret — it
   selects the workload from outside, by label or name, so it never fights the consumer's CD.
+- **Access, never resources.** The gcp provider brokers who-may-do-what: `service_accounts`,
+  `act_as`, `resource_roles`, `wif`. `resource_roles` binds a role ON a resource (a secret, a
+  single SA) and deliberately does NOT create one — an absent target fails loud. Adding a
+  handler that CREATES an app-owned resource crosses the ADR-001 line and needs a decision,
+  not just a commit; `tests/test_engine.py::test_handlers_are_access_only` guards the set.
 - **Adding a provider is a new `providers/<kind>.py`** satisfying the contract core drives
   (`HANDLERS`/`PRUNERS`, `context(target)`, `preflight(ctx)`, `label(key, target, ctx)`).
   Core, the CLI and existing providers stay untouched.

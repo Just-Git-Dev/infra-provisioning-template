@@ -5,9 +5,62 @@ the alternatives were. Newest first.
 
 ## Index
 
+- [2026-08-23 — `resource_roles`: bind a role on one resource, because project scope was the only scope](#2026-08-23--resource_roles-bind-a-role-on-one-resource-because-project-scope-was-the-only-scope)
 - [2026-08-21 — caller inputs move to `env:`; CI grows actionlint and lints `action.yml` itself](#2026-08-21--caller-inputs-move-to-env-ci-grows-actionlint-and-lints-actionyml-itself)
 - [2026-08-20 — SHA-pin this repo's own actions and enforce it in CI](#2026-08-20--sha-pin-this-repos-own-actions-and-enforce-it-in-ci)
 - [2026-08-20 — port the two mutation-path engine fixes from the consumer; release v1.0.1](#2026-08-20--port-the-two-mutation-path-engine-fixes-from-the-consumer-release-v101)
+
+---
+
+## 2026-08-23 — `resource_roles`: bind a role on one resource, because project scope was the only scope
+
+**Problem.** The gcp provider could bind IAM at **project scope only**. `act_as` was the single
+exception, and it is hard-wired to one role (`iam.serviceAccountUser`) on one kind of resource.
+That had two consequences, and the second is the worse one:
+
+1. **It pushed configs toward over-granting.** An SA that needs `setIamPolicy` on exactly one
+   service account had no way to say so, so it got project-wide `iam.serviceAccountAdmin`. Paired
+   with `resourcemanager.projectIamAdmin` that is a full project-takeover primitive, and the
+   consumer had exactly that live on a CI rotator impersonable from two repos.
+2. **It made "zero drift" quietly narrower than it sounds.** Operators still needed those grants,
+   so they bound them by hand at resource scope, where the engine could not see them. A clean
+   dry-run said nothing about them: not planned, not pruned, not reported. In the consumer's fleet
+   that turned out to be a `secretmanager.admin` on one project's secret and three more grants on
+   another's — all real, all invisible.
+
+**Decision.** A fourth subsystem, `resource_roles`, declared on the SA that receives the access:
+
+```yaml
+resource_roles:
+  service_accounts: { app-run: [iam.serviceAccountAdmin] }
+  secrets:          { app-env: [secretmanager.admin] }
+```
+
+It is a generalisation of a shape the provider already had rather than a new concept — `act_as`
+is exactly a resource-scoped binding — so it costs one handler, one pruner, and no change to
+`core.py`, the CLI, or the provider contract.
+
+**The scope line is unmoved, and that is deliberate.** ADR-001 says this engine brokers *access*;
+app repos own *resources*. `resource_roles` binds ON a resource and **never creates one**. An
+absent target raises, with a message naming the app repo as its owner. The tempting alternative —
+skip a missing resource with a warning — was rejected: it makes a clean plan a lie about access
+that does not exist, which is the one property this engine sells.
+
+**Prune conservatism.** Only resources the config *names* are examined, so blast radius is bounded
+by the config rather than by everything in the project. Within those, a member is touched only if
+it is an SA this config declares — same rule as `prune_act_as`. The one addition is `deleted:`
+principals: they reference an identity that no longer exists, cannot be a legitimate grant, and
+are the residue an SA rename leaves behind. Humans, Google-managed service agents, and SAs from
+other projects are never touched.
+
+**Tradeoff.** One extra `get-iam-policy` read per named resource per run, and a config that can
+now fail the whole plan on a missing secret. Both are the intended shape: the read is what makes
+the grant visible at all, and failing closed on a missing resource is the point.
+
+**Verified.** 54 tests pass (8 new, written failing first). The live gcloud output shape the
+pruner parses — `--flatten='bindings[].members' --format='csv[no-heading](bindings.role,bindings.members)'`
+— was captured from a real secret policy before the parser was written, not guessed; the fixture
+in `test_prune_resource_roles_removes_undeclared_owned_sa` is that exact output.
 
 ---
 
