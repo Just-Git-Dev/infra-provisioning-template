@@ -371,3 +371,38 @@ def test_prune_resource_roles_nothing_to_do():
 
 def test_resource_roles_registered_in_both_registries():
     assert "resource_roles" in P.HANDLERS and "resource_roles" in P.PRUNERS
+
+
+def test_prune_resource_roles_leaves_other_subsystems_alone():
+    """An SA named under resource_roles is very often an act_as target too. Pruning its
+    serviceAccountUser grants here would tear down impersonation that act_as declares and
+    prune_act_as owns. Caught by a dry-run against a live project before any apply."""
+    cfg = {"service_accounts": [
+        {"name": "rotator", "act_as": ["api-run"],
+         "resource_roles": {"service_accounts": {"api-run": ["iam.serviceAccountAdmin"]}}},
+        {"name": "releaser", "act_as": ["api-run"]},
+        {"name": "api-run"},
+    ]}
+    live = ("roles/iam.serviceAccountAdmin,serviceAccount:rotator@p.iam.gserviceaccount.com\n"
+            "roles/iam.serviceAccountUser,serviceAccount:rotator@p.iam.gserviceaccount.com\n"
+            "roles/iam.serviceAccountUser,serviceAccount:releaser@p.iam.gserviceaccount.com\n"
+            "roles/iam.workloadIdentityUser,serviceAccount:releaser@p.iam.gserviceaccount.com")
+    out = drive(P.prune_resource_roles, cfg, lambda args: live)
+    assert "serviceAccountUser" not in out
+    assert "workloadIdentityUser" not in out
+    assert "no extra resource_roles bindings" in out
+
+
+def test_prune_resource_roles_still_removes_deleted_holder_of_a_foreign_role():
+    """The foreign-role exemption does NOT cover `deleted:` principals — no subsystem wants
+    a dangling identity, and prune_act_as only ever touches members it owns."""
+    cfg = {"service_accounts": [
+        {"name": "rotator",
+         "resource_roles": {"service_accounts": {"api-run": ["iam.serviceAccountAdmin"]}}},
+        {"name": "api-run"},
+    ]}
+    live = ("roles/iam.serviceAccountUser,deleted:serviceAccount:"
+            "old-releaser@p.iam.gserviceaccount.com?uid=112137767601029596304")
+    out = drive(P.prune_resource_roles, cfg, lambda args: live)
+    assert ("would unbind roles/iam.serviceAccountUser on service account api-run "
+            "from old-releaser (deleted)") in out

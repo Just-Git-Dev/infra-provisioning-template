@@ -223,6 +223,18 @@ _RESOURCE_KINDS = {
 }
 
 
+# Bindings on these (kind, role) pairs belong to ANOTHER subsystem, so prune_resource_roles
+# must not touch them even when resource_roles names the same resource. Without this the
+# pruner tears down every act_as impersonation grant on any SA that also appears under
+# resource_roles — caught by a dry-run against a live project, see DECISIONS 2026-08-23.
+# `deleted:` members are exempt from the exemption: no subsystem wants a dangling principal.
+_FOREIGN_ROLES = {
+    "service_accounts": {"roles/iam.serviceAccountUser",        # owned by act_as
+                         "roles/iam.workloadIdentityUser"},     # owned by wif
+    "secrets": set(),
+}
+
+
 def _qualify(role):
     return role if role.startswith("roles/") else f"roles/{role}"
 
@@ -290,7 +302,11 @@ def prune_resource_roles(cfg, project):
     account THIS config declares. The one addition is `deleted:` principals, which reference an
     identity that no longer exists and so can never be a legitimate grant (they are the residue
     an SA rename leaves behind). Humans, Google-managed service agents and SAs from other
-    projects are never touched."""
+    projects are never touched.
+
+    Bindings another subsystem owns (`_FOREIGN_ROLES`) are also left alone: an SA named under
+    resource_roles is very often an act_as target too, and its serviceAccountUser grants are
+    prune_act_as's business, not this pruner's."""
     print("prune resource_roles:")
     declared = _declared_resource_roles(cfg, project)
     if not declared:
@@ -309,6 +325,8 @@ def prune_resource_roles(cfg, project):
             deleted = member.startswith("deleted:")
             email = member.split(":")[-1].split("?")[0]
             if not deleted:
+                if role in _FOREIGN_ROLES[kind]:
+                    continue                                   # another subsystem owns it
                 if not member.startswith("serviceAccount:") or email not in owned:
                     continue                                   # unmanaged member → keep
                 if (kind, name, role, member) in wanted:
