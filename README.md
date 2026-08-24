@@ -95,11 +95,18 @@ service_accounts:
   - name: ci-rotator
     roles: [run.admin]                      # project-scope
     resource_roles:                         # resource-scope
-      service_accounts: { app-run: [iam.serviceAccountAdmin] }
-      secrets:          { app-env: [secretmanager.admin] }
+      service_accounts:      { app-run: [iam.serviceAccountAdmin] }
+      secrets:               { app-env: [secretmanager.admin] }
+      pubsub_topics:         { orders.created: [pubsub.publisher] }
+      pubsub_subscriptions:  { orders-worker-sub: [pubsub.subscriber] }
+      artifact_repositories: { asia-southeast1/backend: [artifactregistry.writer] }
 ```
 
-Supported kinds: `service_accounts` and `secrets`. The engine **binds** on these resources and
+Supported kinds: `service_accounts`, `secrets`, `pubsub_topics`, `pubsub_subscriptions` and
+`artifact_repositories`. An Artifact Registry repository is per-location and a bare name is
+ambiguous to `gcloud`, so its key carries one: **`<location>/<repo>`** — a name without a
+location fails loud at plan time rather than binding somewhere unintended.
+The engine **binds** on these resources and
 never creates them — a resource that does not exist fails loud rather than being skipped,
 because a silent skip would make a clean plan a lie. `--prune` removes undeclared bindings
 **only from the resources your config names**, and only for members that are SAs the config

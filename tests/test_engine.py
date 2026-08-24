@@ -261,19 +261,6 @@ def test_service_account_display_name_truncated_by_bytes():
     assert value == desc[:33], "expected 33 em-dashes (99 bytes); the 34th would overflow"
 
 
-if __name__ == "__main__":
-    fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
-    failed = 0
-    for fn in fns:
-        try:
-            fn()
-            print(f"PASS {fn.__name__}")
-        except AssertionError as e:
-            failed += 1
-            print(f"FAIL {fn.__name__}: {e}")
-    print(f"\n{len(fns)-failed}/{len(fns)} passed")
-    sys.exit(1 if failed else 0)
-
 
 # ── resource_roles: resource-scoped IAM (ADR-005) ────────────────────────────
 # The gap these close: the provider bound roles at PROJECT scope only, so a grant on a
@@ -437,3 +424,132 @@ def test_prune_provisioner_keeps_the_custom_secret_role():
                 project="p")
     assert "keep projects/p/roles/jgdSecretIamAdmin" in out
     assert "would unbind roles/editor" in out
+
+
+# ── resource_roles: pub/sub + Artifact Registry kinds (ADR-005, extended) ────
+# Secrets and SAs were the first two kinds; topics, subscriptions and GAR repositories are
+# the rest of what this fleet actually grants on. Every one is a resource the APP repo owns
+# and the broker only BINDS on, so they fit the existing table rather than needing new code
+# paths. GAR is the odd one: a repository is not addressable by bare name — it needs a
+# location — so its config name carries one (`<location>/<repo>`).
+
+def test_resource_kinds_cover_pubsub_and_artifact_registry():
+    assert set(P._RESOURCE_KINDS) == {"secrets", "service_accounts", "pubsub_topics",
+                                      "pubsub_subscriptions", "artifact_repositories"}
+    # every kind must declare a foreign-role set, or prune_resource_roles KeyErrors on it
+    assert set(P._FOREIGN_ROLES) == set(P._RESOURCE_KINDS)
+
+
+def test_resource_roles_pubsub_topic_scope():
+    """The live case: `pubsub.publisher` on ONE topic, not project-wide `pubsub.admin`."""
+    cfg = {"service_accounts": [{
+        "name": "api-run",
+        "resource_roles": {"pubsub_topics": {"booking.cancelled": ["pubsub.publisher"]}},
+    }]}
+    seen = []
+
+    def gmap(args):
+        seen.append(args)
+        return "exists" if "describe" in args else ""
+
+    out = drive(P.ensure_resource_roles, cfg, gmap)
+    assert "would   bind roles/pubsub.publisher on topic booking.cancelled → api-run" in out
+    assert ["pubsub", "topics", "describe", "booking.cancelled", "--project", "p"] == seen[0]
+
+
+def test_resource_roles_pubsub_subscription_scope():
+    cfg = {"service_accounts": [{
+        "name": "eventworker",
+        "resource_roles": {"pubsub_subscriptions": {"poke-sub": ["pubsub.subscriber"]}},
+    }]}
+    seen = []
+
+    def gmap(args):
+        seen.append(args)
+        return "exists" if "describe" in args else ""
+
+    out = drive(P.ensure_resource_roles, cfg, gmap)
+    assert "would   bind roles/pubsub.subscriber on subscription poke-sub → eventworker" in out
+    assert ["pubsub", "subscriptions", "describe", "poke-sub", "--project", "p"] == seen[0]
+
+
+def test_resource_roles_artifact_repository_builds_a_qualified_ref():
+    """A GAR repo is only addressable as projects/<p>/locations/<l>/repositories/<r>; the bare
+    name fails argument parsing before it ever reaches the API. The fully-qualified form
+    carries the project, so `--project` is not passed alongside it."""
+    cfg = {"service_accounts": [{
+        "name": "deployer",
+        "resource_roles": {"artifact_repositories": {
+            "asia-southeast1/backend": ["artifactregistry.writer"]}},
+    }]}
+    seen = []
+
+    def gmap(args):
+        seen.append(args)
+        return "exists" if "describe" in args else ""
+
+    out = drive(P.ensure_resource_roles, cfg, gmap)
+    assert ("would   bind roles/artifactregistry.writer on repository "
+            "asia-southeast1/backend → deployer") in out
+    assert seen[0] == ["artifacts", "repositories", "describe",
+                       "projects/p/locations/asia-southeast1/repositories/backend"]
+    assert "--project" not in seen[0]
+
+
+def test_resource_roles_artifact_repository_without_location_fails_loud():
+    """`backend` alone is ambiguous. Guessing a location would bind IAM on the wrong repo (or
+    on nothing), so this must fail at plan time, not at apply time."""
+    cfg = {"service_accounts": [{
+        "name": "deployer",
+        "resource_roles": {"artifact_repositories": {"backend": ["artifactregistry.writer"]}},
+    }]}
+    try:
+        drive(P.ensure_resource_roles, cfg, lambda args: "exists")
+    except SystemExit as e:
+        assert "location" in str(e) and "backend" in str(e)
+    else:
+        raise AssertionError("expected a loud exit for a repository with no location")
+
+
+def test_prune_resource_roles_removes_a_deleted_principal_from_a_topic():
+    """Live on auto-mahn 2026-08-24: `automahn.outbox.poke` still carried pubsub.publisher for
+    `automahn-api-run`, the pre-rename SA. Project-scope-only pruning could never see it."""
+    cfg = {"service_accounts": [
+        {"name": "api-run",
+         "resource_roles": {"pubsub_topics": {"automahn.outbox.poke": ["pubsub.publisher"]}}},
+    ]}
+    live = ("roles/pubsub.publisher,deleted:serviceAccount:automahn-api-run@p.iam."
+            "gserviceaccount.com?uid=117781001628895155170\n"
+            "roles/pubsub.publisher,serviceAccount:api-run@p.iam.gserviceaccount.com")
+    out = drive(P.prune_resource_roles, cfg, lambda args: live)
+    assert "would unbind roles/pubsub.publisher on topic automahn.outbox.poke" in out
+    assert "automahn-api-run (deleted)" in out
+    assert out.count("unbind") == 1, "the live, declared api-run binding must be kept"
+
+
+def test_resource_policy_ignores_an_empty_policy():
+    """A resource with no bindings prints a bare `,` under this flatten+csv pair (seen on both
+    GAR repos and on an unbound subscription). Split naively that becomes a ('', '') pair."""
+    P.gout = lambda args, project=None: ","
+    assert P.resource_policy("secrets", "s", "p") == []
+
+
+# This block MUST stay at the very END of the file: it snapshots globals() at the moment it
+# runs, so any test defined below it is silently never collected. It sat mid-file until
+# 2026-08-24, hiding 20 of 37 tests — every resource_roles test among them — behind a green
+# "17/17 passed". See DECISIONS 2026-08-24.
+if __name__ == "__main__":
+    fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
+    failed = 0
+    for fn in fns:
+        try:
+            fn()
+            print(f"PASS {fn.__name__}")
+        except AssertionError as e:
+            failed += 1
+            print(f"FAIL {fn.__name__}: {e}")
+        except BaseException as e:                 # SystemExit included: a handler that bails
+            failed += 1                            # must fail ONE test, not abort the suite
+            print(f"ERROR {fn.__name__}: {type(e).__name__}: {e}")
+    print(f"\n{len(fns)-failed}/{len(fns)} passed")
+    sys.exit(1 if failed else 0)

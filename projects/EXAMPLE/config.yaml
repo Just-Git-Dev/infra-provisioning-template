@@ -30,6 +30,13 @@ targets:
             your-app-run: [iam.serviceAccountAdmin]        # setIamPolicy on THAT SA only
           secrets:
             your-app-env: [secretmanager.admin]            # manage THAT secret's versions only
+          pubsub_topics:
+            your-app.events: [pubsub.publisher]            # publish to THAT topic only
+          pubsub_subscriptions:
+            your-app-worker-sub: [pubsub.subscriber]       # consume THAT subscription only
+          artifact_repositories:
+            asia-southeast1/backend: [artifactregistry.writer]   # <location>/<repo> — a GAR
+            # repo is per-location, so a bare name is ambiguous and fails loud at plan time.
         # The engine BINDS on these resources; it never creates them (they are app-owned —
         # an absent one fails loud). Without this block such grants live only in the live
         # policy: invisible to the plan, unprunable, and not covered by "zero drift".

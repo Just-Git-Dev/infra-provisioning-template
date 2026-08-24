@@ -214,8 +214,11 @@ def ensure_act_as(cfg, project):
 #
 # Declared on the SA that RECEIVES the access:
 #   resource_roles:
-#     service_accounts: { api-run: [iam.serviceAccountAdmin] }
-#     secrets:          { app-secrets: [secretmanager.admin] }
+#     service_accounts:      { api-run: [iam.serviceAccountAdmin] }
+#     secrets:               { app-secrets: [secretmanager.admin] }
+#     pubsub_topics:         { booking.cancelled: [pubsub.publisher] }
+#     pubsub_subscriptions:  { poke-sub: [pubsub.subscriber] }
+#     artifact_repositories: { asia-southeast1/backend: [artifactregistry.writer] }
 _RESOURCE_KINDS = {
     "secrets": {
         "noun": "secret",
@@ -227,7 +230,36 @@ _RESOURCE_KINDS = {
         "ref": lambda name, project: sa_email(name, project),
         "args": lambda verb, ref, project: ["iam", "service-accounts", verb, ref, "--project", project],
     },
+    "pubsub_topics": {
+        "noun": "topic",
+        "ref": lambda name, project: name,
+        "args": lambda verb, ref, project: ["pubsub", "topics", verb, ref, "--project", project],
+    },
+    "pubsub_subscriptions": {
+        "noun": "subscription",
+        "ref": lambda name, project: name,
+        "args": lambda verb, ref, project: ["pubsub", "subscriptions", verb, ref, "--project", project],
+    },
+    # GAR is the one kind whose resource is not addressable by bare name — `describe backend`
+    # fails argument parsing on a missing `location` attribute before any API call. The config
+    # name therefore carries one (`<location>/<repo>`) and we build the fully-qualified path,
+    # which already encodes the project, so `--project` is not passed alongside it.
+    "artifact_repositories": {
+        "noun": "repository",
+        "ref": lambda name, project: _gar_ref(name, project),
+        "args": lambda verb, ref, project: ["artifacts", "repositories", verb, ref],
+    },
 }
+
+
+def _gar_ref(name, project):
+    location, _, repo = name.partition("/")
+    if not repo:
+        raise SystemExit(
+            f"resource_roles: artifact repository {name!r} has no location. GAR repositories "
+            f"are per-location and a bare name is ambiguous, so declare it as "
+            f"'<location>/{name}' (e.g. 'asia-southeast1/{name}').")
+    return f"projects/{project}/locations/{location}/repositories/{repo}"
 
 
 # Bindings on these (kind, role) pairs belong to ANOTHER subsystem, so prune_resource_roles
@@ -239,6 +271,10 @@ _FOREIGN_ROLES = {
     "service_accounts": {"roles/iam.serviceAccountUser",        # owned by act_as
                          "roles/iam.workloadIdentityUser"},     # owned by wif
     "secrets": set(),
+    # No other subsystem binds on these, so nothing here is exempt from pruning.
+    "pubsub_topics": set(),
+    "pubsub_subscriptions": set(),
+    "artifact_repositories": set(),
 }
 
 
@@ -273,7 +309,7 @@ def resource_policy(kind, ref, project):
         "--format=csv[no-heading](bindings.role,bindings.members)"]
     pairs = []
     for line in gout(args).splitlines():
-        if "," in line:
+        if line.strip(" ,"):   # an unbound resource prints a bare `,` (seen on GAR repos)
             role, member = line.split(",", 1)
             pairs.append((role.strip(), member.strip()))
     return pairs
