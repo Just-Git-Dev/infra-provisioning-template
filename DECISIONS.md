@@ -5,6 +5,8 @@ the alternatives were. Newest first.
 
 ## Index
 
+- [2026-08-24 — `resource_roles` grows pub/sub and Artifact Registry kinds](#2026-08-24--resource_roles-grows-pubsub-and-artifact-registry-kinds)
+- [2026-08-24 — RCA: the engine test runner sat mid-file, so 20 of 37 tests never ran](#2026-08-24--rca-the-engine-test-runner-sat-mid-file-so-20-of-37-tests-never-ran)
 - [2026-08-23 — RCA: a dry-run anchor printed `+`, so it read as if it had changed something](#2026-08-23--rca-a-dry-run-anchor-printed--so-it-read-as-if-it-had-changed-something)
 - [2026-08-23 — the provisioner gets a custom role for secret IAM, because `projectIamAdmin` stops at the project](#2026-08-23--the-provisioner-gets-a-custom-role-for-secret-iam-because-projectiamadmin-stops-at-the-project)
 - [2026-08-23 — RCA: `prune_resource_roles` planned to tear down every `act_as` grant](#2026-08-23--rca-prune_resource_roles-planned-to-tear-down-every-act_as-grant)
@@ -12,6 +14,95 @@ the alternatives were. Newest first.
 - [2026-08-21 — caller inputs move to `env:`; CI grows actionlint and lints `action.yml` itself](#2026-08-21--caller-inputs-move-to-env-ci-grows-actionlint-and-lints-actionyml-itself)
 - [2026-08-20 — SHA-pin this repo's own actions and enforce it in CI](#2026-08-20--sha-pin-this-repos-own-actions-and-enforce-it-in-ci)
 - [2026-08-20 — port the two mutation-path engine fixes from the consumer; release v1.0.1](#2026-08-20--port-the-two-mutation-path-engine-fixes-from-the-consumer-release-v101)
+
+---
+
+## 2026-08-24 — `resource_roles` grows pub/sub and Artifact Registry kinds
+
+**Decision.** `resource_roles` accepts three more kinds — `pubsub_topics`,
+`pubsub_subscriptions` and `artifact_repositories` — alongside the original `secrets` and
+`service_accounts`.
+
+**Why.** The kinds shipped in ADR-005 were the two we happened to need that week, not a
+considered boundary. Everything the ADR says about secrets is equally true of a topic: it is
+an **app-owned resource** the broker only ever *binds* on, and a grant on it was invisible to
+the plan, unprunable, and **not covered by "zero drift"**. Leaving the other kinds out meant
+the honest answer to "is this project's access fully described?" stayed *no* for any project
+using pub/sub or GAR — which is all of them.
+
+A live read of `auto-mahn` while scoping this proved the gap is not theoretical: topic
+`automahn.outbox.poke` still carries `roles/pubsub.publisher` for `automahn-api-run`, the
+**pre-rename** SA (`deleted:` principal, residue of the 2026-08-20 `<component>-<role>`
+rename). Four months of clean project-scope plans could never see it, because it is not a
+project-scope binding.
+
+**Shape.** No new code paths — `_RESOURCE_KINDS` is a table, and these are three more rows.
+That is the point of the table, and it is the argument for having generalised `act_as` into
+`resource_roles` rather than special-casing secrets.
+
+**The one wrinkle: GAR needs a location.** `gcloud artifacts repositories describe backend`
+fails *argument parsing* ("Failed to find attribute [location]") before it reaches the API — a
+repository is per-location and a bare name is ambiguous. Options considered:
+
+1. **A separate `location:` key per repo** — makes the value a mapping instead of a role list,
+   so this one kind stops looking like every other kind.
+2. **Default the location** from a project-level setting — a wrong default binds IAM on a repo
+   the operator did not mean, silently, and only in projects that have several.
+3. **Encode it in the key: `<location>/<repo>`** ← chosen. The key stays a plain string, the
+   value stays a role list, and the engine builds the fully-qualified
+   `projects/<p>/locations/<l>/repositories/<r>` — which gcloud accepts as the positional and
+   which already carries the project, so `--project` is not passed alongside it. A key with no
+   location **fails loud at plan time**, consistent with how an absent resource is handled.
+
+**`_FOREIGN_ROLES` is empty for all three.** That set exists because an SA named under
+`resource_roles` is often an `act_as` target too, and `serviceAccountUser` there belongs to
+another subsystem. No subsystem writes bindings on topics, subscriptions or GAR repos, so
+nothing is exempt and the pruner sees all of it. Revisit if one ever does.
+
+**Also fixed here:** an unbound resource prints a bare `,` under the engine's flatten+csv
+format pair (seen live on both GAR repos and on an unbound subscription). `resource_policy`
+split that into a `('', '')` pair. It was harmless in both callers by luck — `ensure` compares
+against a member and `prune` skips anything not `serviceAccount:` — so this is hardening, not
+a bug fix. Filtering it at the seam means the next kind cannot inherit the trap.
+
+**Not done:** no config declares the new kinds yet. Adopting them on `automahn`/`traide-co` —
+and deciding whether that stale `deleted:` topic binding gets pruned — is a separate,
+apply-bearing change.
+
+---
+
+## 2026-08-24 — RCA: the engine test runner sat mid-file, so 20 of 37 tests never ran
+
+**Symptom.** `python3 tests/test_engine.py` printed `17/17 passed` and CI was green — while
+the file defined **37** tests. The 20 below the runner had never executed, including *every*
+`resource_roles` test (the whole of ADR-005) and the `jgdSecretIamAdmin` /
+`provisioner_kept_roles` tests written for v1.2.0. Found on 2026-08-24 when new tests appended
+to the file were Red-by-construction and the suite still reported all-pass.
+
+**Root cause.** The `if __name__ == "__main__":` block collects tests with
+`[v for k, v in sorted(globals().items()) if k.startswith("test_")]` — a snapshot of
+`globals()` **at the moment it runs**. Python executes top to bottom, so it can only ever see
+definitions *above* it. The block sat at line 264 of 439. Every test appended afterwards
+landed below it and was silently invisible. Nothing appends to `globals()` retroactively, so
+the failure is total and permanent for anything below that line.
+
+**Why it wasn't caught.** The runner reports `N/N passed` where **N is what it collected**,
+not what the file defines. A denominator computed from the same wrong set can never disagree
+with itself, so the output looked healthier the more tests it dropped. The two later suites
+(`test_kubernetes.py`, `test_anchor.py`) happen to keep their runner last and are unaffected —
+verified, not assumed. This is the "a green tick means the check did not run" class: the gate
+stopped checking and said nothing.
+
+**Fix.** Move the block to the end of the file, with a comment saying it must stay there and
+why. Also broadened its `except AssertionError` to `except BaseException`, so a handler that
+raises `SystemExit` (several fail-loud paths do, by design) fails **one** test instead of
+aborting the whole suite at that point — the same under-reporting failure by a different
+route. With both fixed: 37/37 collected, 30 passing before the new feature landed, 37 after.
+
+**Prevention.** The structural fix is the comment plus the end-of-file placement; a test that
+asserts its own collection count would just be another number derived from the same snapshot.
+The honest guard is the one now in place: the runner cannot silently under-collect when there
+is nothing below it, and CI fails loudly on an unexpected exception rather than stopping.
 
 ---
 
