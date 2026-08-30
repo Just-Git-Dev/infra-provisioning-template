@@ -264,6 +264,76 @@ ensure_host(){
   HOST_NUM="$num"
 }
 
+# ── IAM Condition: limit WHICH roles the fleet SA may grant ─────────────────────────
+#
+# `projectIamAdmin` confers projects.setIamPolicy, which does not care WHICH role is being
+# bound — so unconditioned, the fleet SA can grant `roles/owner` to anyone on any project in
+# the org. `iam.googleapis.com/modifiedGrantsByRole` constrains each setIamPolicy call to an
+# allow-list (bootstrap/grantable-roles.txt).
+#
+# hasOnly() caps at 10 roles and the docs FORBID joining several hasOnly() with `||` (a
+# request touching two groups makes both false). So the list is chunked into <=10 and granted
+# as SEPARATE conditional bindings — allow policies are additive, so each single-role call is
+# authorised by whichever binding covers it. That relies on the engine issuing ONE
+# add-iam-policy-binding per role, which it does; see grantable-roles.txt.
+#
+# gcloud's inline --condition is comma-separated and a role list contains commas, so the
+# condition MUST go through --condition-from-file.
+GRANTABLE_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/grantable-roles.txt"
+COND_TITLE_PREFIX="jgd-grantable"
+
+grant_conditional_project_iam_admin(){ # kind id
+  local kind="$1" id="$2" role="roles/resourcemanager.projectIamAdmin"
+  local all=() chunk=()
+  local line n=0 i=0 expr title tmp have
+  while IFS= read -r line; do
+    line="${line%%#*}"; line="$(printf '%s' "$line" | tr -d '[:space:]')"
+    [ -n "$line" ] && all+=("$line")
+  done < "$GRANTABLE_FILE"
+  [ "${#all[@]}" -gt 0 ] || { err "no roles in $GRANTABLE_FILE"; return 1; }
+
+  while [ "$i" -lt "${#all[@]}" ]; do
+    chunk=("${all[@]:$i:10}")
+    n=$((n + 1)); i=$((i + 10))
+    title="${COND_TITLE_PREFIX}-${n}"
+    expr="api.getAttribute('iam.googleapis.com/modifiedGrantsByRole', []).hasOnly([$(printf "'%s'," "${chunk[@]}" | sed 's/,$//')])"
+    if [ "$kind" = org ]; then
+      have="$(g organizations get-iam-policy "$id" --flatten='bindings[].members' \
+                --filter="bindings.role=$role AND bindings.members=serviceAccount:$FLEET_SA" \
+                --format='value(bindings.condition.title)' 2>/dev/null || true)"
+    else
+      have="$(g resource-manager folders get-iam-policy "$id" --flatten='bindings[].members' \
+                --filter="bindings.role=$role AND bindings.members=serviceAccount:$FLEET_SA" \
+                --format='value(bindings.condition.title)' 2>/dev/null || true)"
+    fi
+    if printf '%s\n' "$have" | grep -qx "$title"; then
+      ok "conditional $role [$title] (${#chunk[@]} roles)"
+      continue
+    fi
+    # Print the expression itself: the `~ would:` line can only show the temp file path,
+    # and an unreviewable plan is exactly what this whole runbook tells you not to accept.
+    echo "      condition [$title]: $expr"
+    tmp="$(mktemp)"
+    printf 'expression: |\n  %s\ntitle: %s\ndescription: %s\n' "$expr" "$title" \
+      "Fleet provisioner may grant only the roles in bootstrap/grantable-roles.txt (group $n)" > "$tmp"
+    if [ "$kind" = org ]; then
+      do_or_dry g organizations add-iam-policy-binding "$id" \
+        --member="serviceAccount:$FLEET_SA" --role="$role" --condition-from-file="$tmp" >/dev/null \
+        && add "conditional $role [$title] (${#chunk[@]} roles)"
+    else
+      do_or_dry g resource-manager folders add-iam-policy-binding "$id" \
+        --member="serviceAccount:$FLEET_SA" --role="$role" --condition-from-file="$tmp" >/dev/null \
+        && add "conditional $role [$title] (${#chunk[@]} roles)"
+    fi
+    rm -f "$tmp"
+  done
+
+  echo "  NB: these are ADDITIVE. While the UNCONDITIONAL $role binding still exists the"
+  echo "      conditions change nothing — an unconditional binding always authorises the call."
+  echo "      Removing it is a deliberate, separate step (docs/FLEET-ANCHOR.md): it is the"
+  echo "      only moment with a breakage window, and rollback is re-adding it."
+}
+
 # ── scope-scoped custom role: let the pruner SEE the grants it must never touch ──────
 #
 # Under folder/org reach the fleet SA's predefined roles live at the SCOPE node, not on any
@@ -375,6 +445,8 @@ grant_scope(){ # kind id  (folder|org)
       do_or_dry g organizations add-iam-policy-binding "$id" \
         --member="serviceAccount:$FLEET_SA" --role="$_reader" --condition=None >/dev/null && add "role $_reader"; fi
   fi
+
+  grant_conditional_project_iam_admin "$kind" "$id" || return 1
 
   echo "  NB: folder/org grants PREDEFINED roles only — APIs and project-scoped CUSTOM roles"
   echo "      are still per-project. This run does both on the targets below; a NEW project"

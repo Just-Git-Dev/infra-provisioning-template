@@ -615,6 +615,41 @@ def test_per_project_provisioner_is_unchanged_by_the_fleet_support():
     assert "audit provisioner grants" not in out, "no scope configured; must not audit"
 
 
+def test_one_role_per_set_iam_policy_call():
+    """LOAD-BEARING FOR THE IAM CONDITION, not a style preference.
+
+    The fleet provisioner's projectIamAdmin binding is constrained by
+    `modifiedGrantsByRole ... hasOnly([...])`, capped at 10 roles. More than 10 roles means
+    several conditional BINDINGS, and a setIamPolicy call touching roles from two groups
+    satisfies NEITHER hasOnly() and is denied. Binding one role per call is what keeps that
+    from happening -- batch them and provisioning breaks with a permission error that looks
+    nothing like its cause. See bootstrap/grantable-roles.txt.
+    """
+    cfg = {"service_accounts": [{"name": "sa1",
+                                 "roles": ["run.developer", "pubsub.admin", "logging.logWriter"]}]}
+    calls = []
+    core.DRY = False
+    P.gout = lambda args, project=None: "exists" if "describe" in args else ""
+    P.gcloud = lambda args, project=None, check=True: calls.append(args) or _Ok()
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        P.ensure_service_accounts(cfg, "p")
+    core.DRY = True
+    binds = [a for a in calls if "add-iam-policy-binding" in a]
+    assert len(binds) == 3, "expected one binding call per role, got %d" % len(binds)
+    for a in binds:
+        roles = [x for x in a if x.startswith("--role=")]
+        assert len(roles) == 1, "a single call bound %d roles: %s" % (len(roles), roles)
+    assert not any("set-iam-policy" in " ".join(a) for a in calls), (
+        "set-iam-policy replaces a whole policy document, which modifies many roles in one "
+        "call and cannot satisfy a hasOnly() condition")
+
+
+class _Ok:
+    returncode = 0
+    stdout = ""
+    stderr = ""
+
 
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
