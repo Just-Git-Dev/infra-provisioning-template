@@ -1,0 +1,26 @@
+# Roles the FLEET provisioner may grant at PROJECT level — EDIT THIS for your fleet.
+#
+# It is the allow-list behind the IAM Condition on the fleet SA's
+# `resourcemanager.projectIamAdmin` binding. Unconditioned, that role lets the SA bind ANY
+# role — including `roles/owner` — on any project in the reach. The condition
+#     api.getAttribute('iam.googleapis.com/modifiedGrantsByRole', []).hasOnly([...])
+# restricts every setIamPolicy call to the roles listed here.
+#
+# TWO HARD CONSTRAINTS:
+#  1. hasOnly() takes at most 10 roles, and Google's docs FORBID joining several hasOnly()
+#     with `||` (a request touching two groups makes both false). So this list is chunked
+#     into groups of <=10 and granted as SEPARATE conditional bindings; allow policies are
+#     additive, so a call is authorised by whichever binding covers its role.
+#  2. That works only because EVERY setIamPolicy call modifies EXACTLY ONE role — the engine
+#     issues one `add-iam-policy-binding` per role. If that ever changes, a call spanning two
+#     groups is denied by both. Guarded by
+#     tests/test_engine.py::test_one_role_per_set_iam_policy_call.
+#
+# NOT COVERED: modifiedGrantsByRole applies to project/folder/org allow policies only. IAM on
+# service accounts (act_as/wif) and on secrets is NOT constrained by it — no equivalent
+# attribute exists for those resource types.
+#
+# List every role any of your configs grants to an app SA. A role granted by a config but
+# missing here is DENIED at apply time.
+roles/run.developer
+roles/artifactregistry.writer
