@@ -83,6 +83,46 @@ def test_a_real_run_still_claims_and_mutates():
         assert "MUTATION:" in mutations, f"{script}: a real run invoked no gcloud mutation"
 
 
+# ── regression: folder/org reach must still bind the project-scoped custom role ──────
+#
+# `grant_scope()` skips project-scoped custom roles ("granted per-project"), but the run loop
+# only called `grant_project` in the `grant` branch — under folder/org reach it enabled APIs
+# and nothing else, so the fleet SA was never granted `jgdSecretIamAdmin` on any target.
+# `resource_roles.secrets` then fails PERMISSION_DENIED fleet-wide after cutover, and a
+# dry-run cannot see it: the engine reports zero drift over a subsystem it cannot read.
+REACH_MODES = [
+    ("org", {"REACH": "org", "ORG_ID": "250926570441"}),
+    ("folder", {"REACH": "folder", "FOLDER_ID": "123456789"}),
+]
+
+# The shipped template carries one placeholder row; keep the assertion derived from it
+# rather than hard-coding, so a consumer editing PROJECTS does not break the test.
+TARGET = "your-gcp-project"
+
+
+def test_scope_reach_still_binds_project_scoped_custom_role():
+    for mode, env in REACH_MODES:
+        out, _ = run_anchor("fleet-anchor.sh", dict(env, HOST_PROJECT="host-project"))
+        needle = "projects/%s/roles/jgdSecretIamAdmin" % TARGET
+        assert needle in out, (
+            "REACH=%s: no per-project jgdSecretIamAdmin binding planned. A project-scoped "
+            "custom role cannot be granted at folder/org scope, so it must still be bound "
+            "per-project — otherwise resource_roles.secrets fails PERMISSION_DENIED "
+            "fleet-wide after cutover.\n%s" % (mode, out))
+
+
+def test_scope_reach_does_not_grant_custom_role_at_scope():
+    """The converse guard: granting a project-scoped custom role AT org/folder scope would
+    fail at apply time (the role does not exist there). Per-project binding is the fix."""
+    for mode, env in REACH_MODES:
+        out, _ = run_anchor("fleet-anchor.sh", dict(env, HOST_PROJECT="host-project"))
+        for ln in out.splitlines():
+            if "jgdSecretIamAdmin" in ln and ("organizations add-iam-policy-binding" in ln
+                                              or "folders add-iam-policy-binding" in ln):
+                raise AssertionError("REACH=%s: planned a project-scoped custom role at "
+                                     "%s scope: %s" % (mode, mode, ln))
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0
