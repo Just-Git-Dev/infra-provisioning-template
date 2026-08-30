@@ -295,7 +295,8 @@ grant_scope(){ # kind id  (folder|org)
   echo "──────────── reach: $kind $id (inherited by all projects under it) ────────────"
   for role in "${PROVISIONER_ROLES[@]}"; do
     # A project-scoped custom role cannot be granted at folder/org scope — it does not
-    # exist there. Those are granted per-project by grant_project instead.
+    # exist there. Those are bound per-project: by grant_project under REACH=grant, and by
+    # grant_project_custom_roles under folder/org reach (which also enables the APIs).
     if [ "${role#*\{project\}}" != "$role" ]; then
       ok "skip $role (project-scoped custom role — granted per-project)"
       continue
@@ -310,8 +311,37 @@ grant_scope(){ # kind id  (folder|org)
           --member="serviceAccount:$FLEET_SA" --role="$role" --condition=None >/dev/null && add "role $role"; fi
     fi
   done
-  echo "  NB: folder/org grants IAM reach only — APIs are still per-project. This run enables"
-  echo "      them on the listed target projects below; NEW projects need APIs enabled at creation."
+  echo "  NB: folder/org grants PREDEFINED roles only — APIs and project-scoped CUSTOM roles"
+  echo "      are still per-project. This run does both on the targets below; a NEW project"
+  echo "      needs its APIs enabled AND its custom roles bound before the fleet SA can serve it."
+}
+
+# Under folder/org reach the scope grant covers PREDEFINED roles only. A project-scoped
+# custom role does not exist at that scope, so it must still be created and bound on every
+# target — otherwise the fleet SA silently lacks it, `resource_roles.secrets` fails
+# PERMISSION_DENIED fleet-wide after cutover, and dry-run cannot see it (the engine cannot
+# read what it has no access to, so it reports a confident zero-drift). Guarded by
+# tests/test_anchor.py::test_scope_reach_still_binds_project_scoped_custom_role.
+grant_project_custom_roles(){ # key
+  local key="$1" proj role role_id
+  proj="$(proj_for_key "$key" || true)"
+  [ -n "$proj" ] || { err "unknown project key '$key'"; return 1; }
+  echo ""
+  echo "──────────── per-project: $key ($proj) ────────────"
+  if ! g projects describe "$proj" >/dev/null 2>&1; then
+    err "cannot access '$proj' — enable APIs and bind custom roles manually"; return 1
+  fi
+  ensure_apis "$proj"
+  for role in "${PROVISIONER_ROLES[@]}"; do
+    # predefined roles came from the scope grant; only the {project}-templated ones remain
+    [ "${role#*\{project\}}" != "$role" ] || continue
+    role_id="${role##*/}"
+    ensure_custom_role "$proj" "$role_id" || return 1
+    role="${role//\{project\}/$proj}"
+    if project_has_role "$proj" "$role" "serviceAccount:$FLEET_SA"; then ok "role $role"
+    else do_or_dry g projects add-iam-policy-binding "$proj" \
+           --member="serviceAccount:$FLEET_SA" --role="$role" --condition=None >/dev/null && add "role $role"; fi
+  done
 }
 
 # ── run ─────────────────────────────────────────────────────────────────────
@@ -328,13 +358,7 @@ else
   KEYS=()
   if [ "$#" -gt 0 ]; then KEYS=("$@"); else while IFS= read -r _k; do KEYS+=("$_k"); done < <(all_keys); fi
   for k in "${KEYS[@]}"; do
-    proj="$(proj_for_key "$k" || true)"; [ -n "$proj" ] || continue
-    echo ""; echo "──────────── apis: $k ($proj) ────────────"
-    if g projects describe "$proj" >/dev/null 2>&1; then
-      ensure_apis "$proj"
-    else
-      err "cannot access '$proj' — enable APIs manually"; rc=1
-    fi
+    grant_project_custom_roles "$k" || rc=1
   done
 fi
 
