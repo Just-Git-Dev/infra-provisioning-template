@@ -264,6 +264,50 @@ ensure_host(){
   HOST_NUM="$num"
 }
 
+# ── scope-scoped custom role: let the pruner SEE the grants it must never touch ──────
+#
+# Under folder/org reach the fleet SA's predefined roles live at the SCOPE node, not on any
+# project. The engine's `--prune provisioner` reads PROJECT bindings, so after cutover it
+# cannot see those grants at all — it would report a clean run while policing nothing.
+#
+# The fix is READ access at the scope, and deliberately nothing more:
+#   * No predefined role works. `roles/resourcemanager.organizationViewer` sounds right and
+#     is not — it carries only `organizations.get`, NOT `getIamPolicy` (verified 2026-08-30).
+#     The only predefined role with `organizations.getIamPolicy` is `organizationAdmin`,
+#     which also carries `organizations.setIamPolicy`.
+#   * Granting setIamPolicy would let the fleet SA REWRITE ITS OWN org bindings — a
+#     self-escalation path, and it would let the identity being policed silently "fix" its
+#     own drift. Drift at the scope node must page a human, not be auto-corrected by the
+#     beneficiary. So the pruner is a DETECTOR here, never a mutator.
+# Same reasoning as jgdSecretIamAdmin: the predefined roles are too coarse in the wrong
+# direction, so the least-privilege answer is a custom role with exactly the reads needed.
+#
+# Custom roles exist at PROJECT or ORGANIZATION scope only — never folder — so under
+# REACH=folder this is still created at the org and granted at the folder, which requires
+# ORG_ID. Folder reads are included so one role definition serves either reach.
+SCOPE_READER_ROLE_ID="jgdScopeIamViewer"
+SCOPE_READER_PERMS="resourcemanager.organizations.get,resourcemanager.organizations.getIamPolicy,resourcemanager.folders.get,resourcemanager.folders.getIamPolicy"
+
+ensure_scope_reader_role(){ # org_id
+  local org="$1" live want
+  local title="JGD Scope IAM Viewer"
+  local desc="READ-ONLY view of org/folder IAM so --prune can DETECT drift on the fleet provisioner. Deliberately no setIamPolicy: the policed identity must never rewrite its own grants."
+  live="$(g iam roles describe "$SCOPE_READER_ROLE_ID" --organization="$org" \
+            --format='value[delimiter=","](includedPermissions)' 2>/dev/null || true)"
+  want="$(printf '%s' "$SCOPE_READER_PERMS" | tr ',' '\n' | sort | tr '\n' ' ')"
+  if [ -z "$live" ]; then
+    do_or_dry g iam roles create "$SCOPE_READER_ROLE_ID" --organization="$org" --title="$title" \
+      --description="$desc" --permissions="$SCOPE_READER_PERMS" --stage=GA >/dev/null \
+      && add "custom role $SCOPE_READER_ROLE_ID (org $org)"
+  elif [ "$(printf '%s' "$live" | tr ',' '\n' | sort | tr '\n' ' ')" != "$want" ]; then
+    do_or_dry g iam roles update "$SCOPE_READER_ROLE_ID" --organization="$org" --title="$title" \
+      --description="$desc" --permissions="$SCOPE_READER_PERMS" --stage=GA >/dev/null \
+      && add "custom role $SCOPE_READER_ROLE_ID (permissions synced)"
+  else
+    ok "custom role $SCOPE_READER_ROLE_ID"
+  fi
+}
+
 # ── REACH: give the fleet SA admin on the targets ────────────────────────────
 grant_project(){ # key
   local key="$1" proj role
@@ -311,6 +355,27 @@ grant_scope(){ # kind id  (folder|org)
           --member="serviceAccount:$FLEET_SA" --role="$role" --condition=None >/dev/null && add "role $role"; fi
     fi
   done
+  # The scope-scoped read role — so `--prune provisioner` can SEE the grants above.
+  # Without it the pruner reports a clean run over bindings it cannot read at all.
+  local _org_for_role=""
+  if [ "$kind" = org ]; then _org_for_role="$id"; else _org_for_role="${ORG_ID:-}"; fi
+  if [ -z "$_org_for_role" ]; then
+    err "REACH=folder needs ORG_ID too: a custom role cannot be created at folder scope, and"
+    err "  without $SCOPE_READER_ROLE_ID the provisioner prune silently polices nothing."
+    return 1
+  fi
+  ensure_scope_reader_role "$_org_for_role" || return 1
+  local _reader="organizations/$_org_for_role/roles/$SCOPE_READER_ROLE_ID"
+  if [ "$kind" = folder ]; then
+    if folder_has_role "$id" "$_reader" "serviceAccount:$FLEET_SA"; then ok "role $_reader"; else
+      do_or_dry g resource-manager folders add-iam-policy-binding "$id" \
+        --member="serviceAccount:$FLEET_SA" --role="$_reader" --condition=None >/dev/null && add "role $_reader"; fi
+  else
+    if org_has_role "$id" "$_reader" "serviceAccount:$FLEET_SA"; then ok "role $_reader"; else
+      do_or_dry g organizations add-iam-policy-binding "$id" \
+        --member="serviceAccount:$FLEET_SA" --role="$_reader" --condition=None >/dev/null && add "role $_reader"; fi
+  fi
+
   echo "  NB: folder/org grants PREDEFINED roles only — APIs and project-scoped CUSTOM roles"
   echo "      are still per-project. This run does both on the targets below; a NEW project"
   echo "      needs its APIs enabled AND its custom roles bound before the fleet SA can serve it."

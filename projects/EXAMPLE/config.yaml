@@ -16,6 +16,26 @@ targets:
       github_org: YourOrg
       region:     asia-southeast1
 
+    # OPTIONAL — only for a FLEET anchor (bootstrap/fleet-anchor.sh, ADR-003 Phase 4).
+    # Omit this block entirely for the default per-project anchor: the provisioner is then
+    # `infra-provisioner@<gcp_id>` and its roles are bound ON this project, which is what
+    # `--prune provisioner` reads.
+    #
+    # With a fleet anchor, ONE service account in a host project brokers every project, and
+    # its predefined roles are granted at an org/folder node instead. Those bindings are not
+    # on this project, so a project-level read cannot see them: without `scope` the prune
+    # would report a clean run while policing nothing at all. `scope` tells it where to look.
+    #
+    # The audit there is READ-ONLY BY DESIGN. It reports undeclared roles and fails the run;
+    # it never removes them. The identity being policed must not be able to rewrite its own
+    # grants -- which is also why the fleet SA holds a read-only custom role at the scope
+    # (jgdScopeIamViewer) rather than organizationAdmin.
+    #
+    # NOTE: in a `targets:`-style config this block belongs INSIDE the gcp target, as here.
+    # provisioner:
+    #   service_account: infra-provisioner-fleet@your-host-project.iam.gserviceaccount.com
+    #   scope: organizations/000000000000     # or folders/000000000000
+
     service_accounts:
       - name: github-releaser
         description: "CI releaser — build + deploy (owner: platform)"

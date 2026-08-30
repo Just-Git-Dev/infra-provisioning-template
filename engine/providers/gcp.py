@@ -20,6 +20,7 @@ Tests stub `gcloud`/`gout` here (no GCP access needed).
 """
 import os
 import subprocess
+import sys
 
 import core
 from core import c
@@ -91,6 +92,10 @@ def sa_user_members(project, email):
 
 
 PROVISIONER_SA = "infra-provisioner"   # anchor-owned SA (not declared in configs)
+
+# Mirrors SCOPE_READER_ROLE_ID in bootstrap/fleet-anchor.sh; kept in sync by
+# tests/test_anchor.py::test_engine_and_script_agree_on_the_scope_reader_role.
+SCOPE_READER_ROLE_ID = "jgdScopeIamViewer"
 
 
 def provisioner_kept_roles(project=None):
@@ -420,22 +425,92 @@ def prune_service_accounts(cfg, project):
             _remove_binding(project, email, role, name)
 
 
+def provisioner_identity(cfg, project):
+    """(email, scope) for whichever SA brokers access to this project.
+
+    Default — no `provisioner:` block — is the per-project anchor SA, whose roles are bound
+    ON the project, which is what `sa_project_roles` reads. A FLEET anchor instead puts one
+    SA in a host project and grants it at an org/folder node; those bindings are not on the
+    project and are invisible to a project-level read. `scope` (e.g. "organizations/123")
+    says where to go looking, and is None for the per-project shape.
+    """
+    p = cfg.get("provisioner") or {}
+    return (p.get("service_account") or sa_email(PROVISIONER_SA, project),
+            p.get("scope") or None)
+
+
+def _scope_roles(scope, email):
+    """Roles bound to `email` at an org/folder node. Fails loud if it cannot read: a
+    permission gap must never be indistinguishable from 'no extra roles'."""
+    kind, _, ident = scope.partition("/")
+    member = f"serviceAccount:{email}"
+    common = ["get-iam-policy", ident, "--flatten=bindings[].members",
+              f"--filter=bindings.members={member}", "--format=value(bindings.role)"]
+    if kind == "organizations":
+        args = ["organizations"] + common
+    elif kind == "folders":
+        args = ["resource-manager", "folders"] + common
+    else:
+        sys.exit(f"provisioner.scope must be organizations/<id> or folders/<id>, got {scope!r}")
+    return [r for r in gout(args).splitlines() if r]
+
+
+def _audit_scope_grants(email, scope, keep):
+    """DETECT drift on a scope-scoped provisioner. Deliberately never removes anything.
+
+    The identity holding these grants must not be able to rewrite them — that is why it
+    holds a read-only custom role here and not organizationAdmin. An identity that can
+    silently 'fix' its own privilege drift is not being policed. So this reports and fails;
+    a human decides.
+    """
+    print(f"audit provisioner grants at {scope}:")
+    allowed = set(keep) | {f"{scope}/roles/{SCOPE_READER_ROLE_ID}"}
+    live = _scope_roles(scope, email)
+    if not live:
+        # Not 'clean': the SA is supposed to hold its predefined roles here. Empty means
+        # the grants moved, or this is the wrong scope — either way, say so.
+        c("err", f"{email} holds NO roles at {scope} — wrong scope, or the fleet grant is gone")
+        return [f"no roles bound to {email} at {scope}"]
+    extra = [r for r in live if r not in allowed]
+    for role in live:
+        if role in allowed:
+            c("ok", f"keep {role}")
+    for role in extra:
+        c("err", f"UNDECLARED at {scope}: {role}")
+    if extra:
+        c("err", "not removed by design — a scope grant is changed by a human, "
+                 "not by the identity that benefits from it")
+    return [f"undeclared role {r}" for r in extra]
+
+
 def prune_provisioner(cfg, project):
-    """Remove any project role on the anchor-owned infra-provisioner SA that is not in
+    """Remove any PROJECT role on the provisioner SA that is not in
     bootstrap/provisioner-roles.txt (the shared kept-set). Safe: projectIamAdmin is kept,
-    so the SA never removes its own ability to finish the prune."""
+    so the SA never removes its own ability to finish the prune.
+
+    Under a fleet anchor the SA's predefined roles live at an org/folder node instead. Those
+    are audited, not pruned — see `_audit_scope_grants`. Without that audit this function
+    would read a project policy that legitimately contains almost nothing and report a clean
+    run while policing nothing at all.
+    """
     print("prune provisioner SA:")
-    email = sa_email(PROVISIONER_SA, project)
+    email, scope = provisioner_identity(cfg, project)
     keep = provisioner_kept_roles(project)
     live = sa_project_roles(project, email)
-    if not live:
-        c("skip", f"{PROVISIONER_SA}: no readable roles (need projectIamAdmin to prune)")
-        return
-    for role in live:
-        if role in keep:
-            c("ok", f"keep {role}")
-        else:
-            _remove_binding(project, email, role, PROVISIONER_SA)
+    if live:
+        for role in live:
+            if role in keep:
+                c("ok", f"keep {role}")
+            else:
+                _remove_binding(project, email, role, email.split("@")[0])
+    elif not scope:
+        c("skip", f"{email}: no readable roles (need projectIamAdmin to prune)")
+    else:
+        c("ok", f"{email}: no project-level roles (expected — this is a fleet provisioner)")
+    if scope:
+        problems = _audit_scope_grants(email, scope, keep)
+        if problems:
+            sys.exit(f"provisioner scope audit FAILED at {scope}: " + "; ".join(problems))
 
 
 def prune_act_as(cfg, project):

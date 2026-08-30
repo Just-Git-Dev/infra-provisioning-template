@@ -538,6 +538,84 @@ def test_resource_policy_ignores_an_empty_policy():
 # runs, so any test defined below it is silently never collected. It sat mid-file until
 # 2026-08-24, hiding 20 of 37 tests — every resource_roles test among them — behind a green
 # "17/17 passed". See DECISIONS 2026-08-24.
+
+
+# ── fleet provisioner: the scope audit ───────────────────────────────────────
+# A fleet-anchored provisioner's predefined roles live at an org/folder node, NOT on the
+# project. prune_provisioner reads PROJECT bindings, so without the audit it would read a
+# policy that legitimately contains almost nothing and print a clean run while policing
+# nothing. These guard that it looks at the scope, and that it never mutates there.
+FLEET_CFG = {"provisioner": {
+    "service_account": "infra-provisioner-fleet@jgd-admin.iam.gserviceaccount.com",
+    "scope": "organizations/250926570441"}}
+
+
+def test_provisioner_identity_defaults_to_the_per_project_anchor():
+    email, scope = P.provisioner_identity({}, "p")
+    assert email == "infra-provisioner@p.iam.gserviceaccount.com", email
+    assert scope is None, scope
+
+
+def test_provisioner_identity_reads_the_fleet_block():
+    email, scope = P.provisioner_identity(FLEET_CFG, "p")
+    assert email == "infra-provisioner-fleet@jgd-admin.iam.gserviceaccount.com", email
+    assert scope == "organizations/250926570441", scope
+
+
+def _fleet_gmap(scope_roles):
+    def gmap(args):
+        j = " ".join(args)
+        if "organizations" in j or "folders" in j:
+            return "\n".join(scope_roles)
+        return ""      # no project-level roles: the normal fleet shape
+    return gmap
+
+
+def test_scope_audit_reports_kept_roles_and_does_not_prune_them():
+    out = drive(P.prune_provisioner, FLEET_CFG, _fleet_gmap([
+        "roles/iam.serviceAccountAdmin",
+        "roles/resourcemanager.projectIamAdmin",
+        "roles/iam.workloadIdentityPoolAdmin",
+        "organizations/250926570441/roles/jgdScopeIamViewer"]))
+    assert "audit provisioner grants at organizations/250926570441" in out, out
+    assert "keep roles/resourcemanager.projectIamAdmin" in out, out
+    assert "jgdScopeIamViewer" in out, out
+    # an empty project policy is EXPECTED here and must not read as a skip/failure
+    assert "no project-level roles (expected" in out, out
+
+
+def test_scope_audit_flags_an_undeclared_role_and_refuses_to_remove_it():
+    try:
+        out = drive(P.prune_provisioner, FLEET_CFG, _fleet_gmap([
+            "roles/iam.serviceAccountAdmin",
+            "roles/owner"]))
+    except SystemExit as e:
+        assert "undeclared" in str(e), e
+    else:
+        raise AssertionError("undeclared scope role did not fail the run:\n" + out)
+
+
+def test_scope_audit_treats_an_empty_scope_policy_as_an_error_not_as_clean():
+    """The SA is supposed to hold roles here. Empty means wrong scope or a vanished grant --
+    the one thing it must not do is print nothing and look fine, so it FAILS the run and
+    says why (not "undeclared role", which is a different problem)."""
+    try:
+        out = drive(P.prune_provisioner, FLEET_CFG, _fleet_gmap([]))
+    except SystemExit as e:
+        assert "no roles bound" in str(e), e
+    else:
+        raise AssertionError("an empty scope policy passed as clean:\n" + out)
+
+
+def test_per_project_provisioner_is_unchanged_by_the_fleet_support():
+    live = ["roles/iam.serviceAccountAdmin", "roles/editor"]
+    out = drive(P.prune_provisioner, {}, lambda args: "\n".join(live))
+    assert "keep roles/iam.serviceAccountAdmin" in out, out
+    assert "roles/editor" in out, out
+    assert "audit provisioner grants" not in out, "no scope configured; must not audit"
+
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0
