@@ -257,13 +257,20 @@ ensure_host(){
   if g iam workload-identity-pools providers describe "$PROVIDER_ID" --project="$HOST_PROJECT" --location=global \
        --workload-identity-pool="$POOL_ID" >/dev/null 2>&1; then
     _want="OIDC provider — only ${PROVISIONER_REPO} may mint tokens here. | $PROVENANCE"
+    # displayName too, not just description: it is the field the console LIST view shows,
+    # and providers created before this carried NEITHER (audit 2026-08-30) — a
+    # description-only sync left them still nameless in the list.
     _have="$(g iam workload-identity-pools providers describe "$PROVIDER_ID" \
               --project="$HOST_PROJECT" --location=global --workload-identity-pool="$POOL_ID" \
               --format='value(description)' 2>/dev/null || true)"
-    if [ "$_have" != "$_want" ]; then
+    _have_dn="$(g iam workload-identity-pools providers describe "$PROVIDER_ID" \
+                 --project="$HOST_PROJECT" --location=global --workload-identity-pool="$POOL_ID" \
+                 --format='value(displayName)' 2>/dev/null || true)"
+    if [ "$_have" != "$_want" ] || [ "$_have_dn" != "$PROVIDER_ID" ]; then
       do_or_dry g iam workload-identity-pools providers update-oidc "$PROVIDER_ID" \
         --project="$HOST_PROJECT" --location=global --workload-identity-pool="$POOL_ID" \
-        --description="$_want" >/dev/null && add "wif provider $PROVIDER_ID (description synced)"
+        --display-name="$PROVIDER_ID" \
+        --description="$_want" >/dev/null && add "wif provider $PROVIDER_ID (metadata synced)"
     else
       ok "wif provider $PROVIDER_ID"
     fi
