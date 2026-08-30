@@ -92,7 +92,9 @@ def test_a_real_run_still_claims_and_mutates():
 # dry-run cannot see it: the engine reports zero drift over a subsystem it cannot read.
 REACH_MODES = [
     ("org", {"REACH": "org", "ORG_ID": "250926570441"}),
-    ("folder", {"REACH": "folder", "FOLDER_ID": "123456789"}),
+    # folder reach needs ORG_ID too: a custom role cannot be created at folder scope, so
+    # jgdScopeIamViewer is defined at the org and granted at the folder.
+    ("folder", {"REACH": "folder", "FOLDER_ID": "123456789", "ORG_ID": "250926570441"}),
 ]
 
 # The shipped template carries one placeholder row; keep the assertion derived from it
@@ -121,6 +123,42 @@ def test_scope_reach_does_not_grant_custom_role_at_scope():
                                               or "folders add-iam-policy-binding" in ln):
                 raise AssertionError("REACH=%s: planned a project-scoped custom role at "
                                      "%s scope: %s" % (mode, mode, ln))
+
+
+def test_scope_reader_role_is_read_only_and_granted():
+    """The pruner must be able to SEE scope-level grants, and must never be able to change
+    them: a policed identity that can rewrite its own bindings polices nothing. Guards both
+    halves — the role is created and granted, and it carries no setIamPolicy."""
+    for mode, env in REACH_MODES:
+        out, _ = run_anchor("fleet-anchor.sh", dict(env, HOST_PROJECT="host-project"))
+        assert "jgdScopeIamViewer" in out, (
+            "REACH=%s: no jgdScopeIamViewer planned — --prune provisioner would read no "
+            "scope bindings at all and report a clean run over nothing.\n%s" % (mode, out))
+        for ln in out.splitlines():
+            if "jgdScopeIamViewer" in ln and "roles create" in ln:
+                # inspect the --permissions VALUE only: the description legitimately
+                # contains the word "setIamPolicy" while promising not to grant it.
+                perms = ln.split("--permissions=", 1)[1].split(" ")[0]
+                bad = [x for x in perms.split(",") if x.endswith("setIamPolicy")]
+                assert not bad, ("REACH=%s: scope viewer role defined with %s — a policed "
+                                 "identity must not rewrite its own bindings" % (mode, bad))
+                assert any(x.endswith("getIamPolicy") for x in perms.split(",")), (
+                    "REACH=%s: the scope viewer role cannot read an IAM policy, which is "
+                    "its entire purpose: %s" % (mode, perms))
+
+
+def test_engine_and_script_agree_on_the_scope_reader_role():
+    """The role id is spelled in two places: the script CREATES it, the engine EXPECTS it in
+    the allowed set. If they drift, the audit reports the provisioner's own read role as an
+    undeclared grant and fails every prune."""
+    script = open(os.path.join(ROOT, "bootstrap", "fleet-anchor.sh")).read()
+    line = [l for l in script.splitlines() if l.startswith("SCOPE_READER_ROLE_ID=")]
+    assert len(line) == 1, "expected exactly one SCOPE_READER_ROLE_ID in fleet-anchor.sh"
+    from_script = line[0].split("=", 1)[1].strip().strip('"')
+    sys.path.insert(0, os.path.join(ROOT, "engine"))
+    from providers import gcp
+    assert gcp.SCOPE_READER_ROLE_ID == from_script, (
+        "engine says %r, fleet-anchor.sh says %r" % (gcp.SCOPE_READER_ROLE_ID, from_script))
 
 
 if __name__ == "__main__":
