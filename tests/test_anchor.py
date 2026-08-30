@@ -161,6 +161,32 @@ def test_engine_and_script_agree_on_the_scope_reader_role():
         "engine says %r, fleet-anchor.sh says %r" % (gcp.SCOPE_READER_ROLE_ID, from_script))
 
 
+def test_every_created_resource_carries_provenance():
+    """Audited 2026-08-30: provenance was determinable for ZERO resources in the fleet — the
+    WIF providers had no displayName or description at all, so a console reader saw only an
+    attributeCondition. GCP exposes no labels on SAs, WIF pools/providers or custom roles, so
+    `description` is the only slot and it must carry origin as well as purpose."""
+    for script, env in ANCHORS:
+        out, _ = run_anchor(script, env)
+        planned = [l for l in out.splitlines() if "would:" in l]
+        creates = [l for l in planned
+                   if (" create " in l or "create-oidc" in l or " roles create " in l)]
+        assert creates, "%s planned no creations against an empty stub" % script
+        for ln in creates:
+            assert "--description=" in ln, "%s: created with no description: %s" % (script, ln)
+            assert "do not edit by hand" in ln or "Managed by" in ln, \
+                "%s: created without provenance: %s" % (script, ln)
+
+
+def test_wif_provider_gets_a_display_name():
+    """The live providers had none, which is why the console showed only their id."""
+    for script, env in ANCHORS:
+        out, _ = run_anchor(script, env)
+        for ln in out.splitlines():
+            if "create-oidc" in ln:
+                assert "--display-name=" in ln, "%s: provider without displayName: %s" % (script, ln)
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

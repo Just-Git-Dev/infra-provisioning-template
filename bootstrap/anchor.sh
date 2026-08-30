@@ -33,6 +33,14 @@
 set -euo pipefail
 
 # ── Config ──────────────────────────────────────────────────────────────────
+# Every resource these anchors create says WHO manages it. Audited 2026-08-30: provenance
+# was determinable for ZERO resources in the fleet — the WIF providers carried no
+# displayName or description at all, so a console reader saw only an attributeCondition.
+# GCP has no labels on SAs, WIF pools/providers or custom roles; `description` is the only
+# slot available, so it has to carry both purpose and origin.
+PROVENANCE="Created by bootstrap/anchor.sh in the infra-provisioning config repo — do not edit by hand."
+
+
 PROVISIONER_REPO="${PROVISIONER_REPO:-YourOrg/your-config-repo}"   # the only repo allowed to impersonate the SA
 
 # Dedicated WIF names — kept distinct from the app repos' `github-pool`/`github-provider`
@@ -125,7 +133,7 @@ ensure_custom_role(){ # proj role_id
       # Exactly what the engine needs to manage IAM ON a secret, and nothing more.
       perms="secretmanager.secrets.get,secretmanager.secrets.getIamPolicy,secretmanager.secrets.setIamPolicy"
       title="JGD Secret IAM Admin"
-      desc="Manage WHO may access a secret. Cannot create, delete, or read one (no versions.access). Held by infra-provisioner so resource_roles.secrets can bind."
+      desc="Manage WHO may access a secret. Cannot create, delete, or read one (no versions.access). Held by the provisioner SA so resource_roles.secrets can bind. | $PROVENANCE"
       ;;
     *)
       err "provisioner-roles.txt names custom role '$id', which this script does not define"
@@ -136,15 +144,21 @@ ensure_custom_role(){ # proj role_id
   # fails loud, which is the right outcome — undelete is a human decision, not a script's.
   live="$(g iam roles describe "$id" --project="$proj" \
             --format='value[delimiter=","](includedPermissions)' 2>/dev/null || true)"
+  # Compare the DESCRIPTION too, not just permissions: a role whose description goes stale
+  # (or predates provenance) would otherwise never be corrected — the audit of 2026-08-30
+  # found exactly that.
+  live_desc="$(g iam roles describe "$id" --project="$proj" \
+                --format='value(description)' 2>/dev/null || true)"
   want="$(printf '%s' "$perms" | tr ',' '\n' | sort | tr '\n' ' ')"
   if [ -z "$live" ]; then
     do_or_dry g iam roles create "$id" --project="$proj" --title="$title" \
       --description="$desc" --permissions="$perms" --stage=GA >/dev/null && add "custom role $id"
-  elif [ "$(printf '%s' "$live" | tr ',' '\n' | sort | tr '\n' ' ')" != "$want" ]; then
+  elif [ "$(printf '%s' "$live" | tr ',' '\n' | sort | tr '\n' ' ')" != "$want" ] \
+       || [ "$live_desc" != "$desc" ]; then
     # Reconcile: the role exists but its permissions have drifted from this definition.
     do_or_dry g iam roles update "$id" --project="$proj" --title="$title" \
       --description="$desc" --permissions="$perms" --stage=GA >/dev/null \
-      && add "custom role $id (permissions synced)"
+      && add "custom role $id (metadata synced)"
   else
     ok "custom role $id"
   fi
@@ -185,7 +199,8 @@ anchor_one(){
     ok "wif pool $POOL_ID"
   else
     do_or_dry g iam workload-identity-pools create "$POOL_ID" --project="$proj" --location=global \
-      --display-name="JGD provisioner"
+      --display-name="JGD provisioner" \
+      --description="Per-project WIF pool for the provisioning repo (deliberately NOT the app-repo pool) | $PROVENANCE"
     add "wif pool $POOL_ID"
   fi
 
@@ -198,7 +213,9 @@ anchor_one(){
       --project="$proj" --location=global --workload-identity-pool="$POOL_ID" \
       --issuer-uri="$GITHUB_ISSUER" \
       --attribute-mapping="google.subject=assertion.sub,attribute.repository=assertion.repository,attribute.repository_owner=assertion.repository_owner" \
-      --attribute-condition="assertion.repository=='${PROVISIONER_REPO}'"
+      --attribute-condition="assertion.repository=='${PROVISIONER_REPO}'" \
+      --display-name="$PROVIDER_ID" \
+      --description="OIDC provider — only ${PROVISIONER_REPO} may mint tokens here. | $PROVENANCE"
     add "wif provider $PROVIDER_ID (repo-scoped: $PROVISIONER_REPO)"
   fi
 
@@ -207,7 +224,8 @@ anchor_one(){
   if g iam service-accounts describe "$sa" --project="$proj" >/dev/null 2>&1; then
     ok "sa $sa"
   else
-    do_or_dry g iam service-accounts create "$SA_ID" --project="$proj" --display-name="$SA_DISPLAY"
+    do_or_dry g iam service-accounts create "$SA_ID" --project="$proj" --display-name="$SA_DISPLAY" \
+      --description="Keyless WIF access/identity broker for this project | $PROVENANCE"
     add "sa $sa"
   fi
 
