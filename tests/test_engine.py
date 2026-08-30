@@ -40,7 +40,7 @@ def test_service_account_role_present_vs_missing():
         if "describe" in args:
             # displayName \x1f description, exactly as the engine asks gcloud to format it,
             # and already matching what the config wants -- so no metadata sync is planned.
-            return "sa1\x1f" + P._described("")
+            return "sa1\t" + P._described("")
         if "run.admin" in j:
             return "roles/run.admin"              # role present
         return ""                                  # pubsub.admin missing
@@ -678,7 +678,7 @@ def test_service_account_metadata_is_reconciled_not_only_created():
     cfg = {"service_accounts": [{"name": "sa1", "description": "CI releaser (owner: platform)",
                                  "roles": []}]}
     calls = _capture(P.ensure_service_accounts, cfg,
-                     lambda args: "sa1\x1f" if "describe" in args else "")
+                     lambda args: "sa1\t" if "describe" in args else "")
     upd = [a for a in calls if "update" in a]
     assert upd, "drifted metadata was not updated: %s" % calls
     flat = " ".join(upd[0])
@@ -709,6 +709,33 @@ def test_description_is_clipped_on_bytes_not_characters():
     got = P._described(long_purpose)
     assert len(got.encode("utf-8")) <= P._DESCRIPTION_MAX, len(got.encode("utf-8"))
     got.encode("utf-8").decode("utf-8")   # must not be a partial trailing char
+
+
+def test_metadata_reconcile_converges():
+    """The first version of this compared against a custom `delimiter=` that gcloud silently
+    IGNORES (it emits a TAB), so have_desc was always empty, every SA compared as drifted, and
+    an apply rewrote identical metadata forever. A reconcile that never converges is a bug even
+    when every write is correct -- so assert the SETTLED state plans nothing."""
+    cfg = {"service_accounts": [{"name": "sa1", "description": "CI releaser (owner: platform)",
+                                 "roles": []}]}
+    settled = "%s\t%s" % (P._clip("CI releaser (owner: platform)", P._DISPLAY_NAME_MAX),
+                          P._described("CI releaser (owner: platform)"))
+    calls = _capture(P.ensure_service_accounts, cfg,
+                     lambda args: settled if "describe" in args else "")
+    assert not [a for a in calls if "update" in a], \
+        "already-correct metadata still planned an update: %s" % calls
+
+
+def test_metadata_reconcile_tolerates_a_trailing_space_from_clipping():
+    """A byte-clip landing on a space leaves a trailing space that GCP trims on write; without
+    stripping both sides that also never converges."""
+    purpose = "x" * 99 + " tail"
+    cfg = {"service_accounts": [{"name": "sa1", "description": purpose, "roles": []}]}
+    settled = "%s\t%s" % (P._clip(purpose, P._DISPLAY_NAME_MAX).strip(), P._described(purpose))
+    calls = _capture(P.ensure_service_accounts, cfg,
+                     lambda args: settled if "describe" in args else "")
+    assert not [a for a in calls if "update" in a], \
+        "trailing-space clip planned a needless update: %s" % calls
 
 
 if __name__ == "__main__":

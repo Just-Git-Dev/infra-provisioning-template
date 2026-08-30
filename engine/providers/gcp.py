@@ -147,14 +147,21 @@ def ensure_service_accounts(cfg, project):
         purpose = sa.get("description", "")
         want_dn = _clip(purpose or name, _DISPLAY_NAME_MAX)
         want_desc = _described(purpose)
+        # TAB-separated, and deliberately NOT a custom delimiter: gcloud silently IGNORES
+        # `value[delimiter=<control char>]` and falls back to a tab, so splitting on the
+        # requested delimiter never matched, every SA compared as drifted, and the reconcile
+        # rewrote the same metadata on every single apply. displayName cannot contain a tab;
+        # partitioning on the FIRST one keeps any tab inside a description with the description.
         live = gout(["iam", "service-accounts", "describe", email,
-                     "--format=value[delimiter=\u001f](displayName,description)"], project)
+                     "--format=value(displayName,description)"], project)
         if live:
             # RECONCILE, don't just create. Metadata used to be written at create only, so a
             # config `description:` edit never reached GCP and displayNames silently went
             # stale (six SAs were found still carrying their bare id — audit 2026-08-30).
-            have_dn, _, have_desc = live.partition("\u001f")
-            if have_dn.strip() != want_dn or have_desc.strip() != want_desc:
+            have_dn, _, have_desc = live.partition("\t")
+            # strip BOTH sides: a clip landing on a space leaves a trailing space that GCP
+            # trims on write, which would also make this compare unequal forever.
+            if have_dn.strip() != want_dn.strip() or have_desc.strip() != want_desc.strip():
                 do(["iam", "service-accounts", "update", email,
                     f"--display-name={want_dn}", f"--description={want_desc}"],
                    project, f"  sync metadata on {email}")
