@@ -47,6 +47,14 @@
 set -euo pipefail
 
 # ── Config ──────────────────────────────────────────────────────────────────
+# Every resource these anchors create says WHO manages it. Audited 2026-08-30: provenance
+# was determinable for ZERO resources in the fleet — the WIF providers carried no
+# displayName or description at all, so a console reader saw only an attributeCondition.
+# GCP has no labels on SAs, WIF pools/providers or custom roles; `description` is the only
+# slot available, so it has to carry both purpose and origin.
+PROVENANCE="Created by bootstrap/fleet-anchor.sh in the infra-provisioning config repo — do not edit by hand."
+
+
 PROVISIONER_REPO="${PROVISIONER_REPO:-YourOrg/your-config-repo}"   # the only repo allowed to impersonate the fleet SA
 
 # Fleet WIF names — distinct from anchor.sh's per-project `jgd-provisioner-pool` so the two
@@ -155,7 +163,7 @@ ensure_custom_role(){ # proj role_id
       # Exactly what the engine needs to manage IAM ON a secret, and nothing more.
       perms="secretmanager.secrets.get,secretmanager.secrets.getIamPolicy,secretmanager.secrets.setIamPolicy"
       title="JGD Secret IAM Admin"
-      desc="Manage WHO may access a secret. Cannot create, delete, or read one (no versions.access). Held by infra-provisioner so resource_roles.secrets can bind."
+      desc="Manage WHO may access a secret. Cannot create, delete, or read one (no versions.access). Held by the provisioner SA so resource_roles.secrets can bind. | $PROVENANCE"
       ;;
     *)
       err "provisioner-roles.txt names custom role '$id', which this script does not define"
@@ -166,15 +174,21 @@ ensure_custom_role(){ # proj role_id
   # fails loud, which is the right outcome — undelete is a human decision, not a script's.
   live="$(g iam roles describe "$id" --project="$proj" \
             --format='value[delimiter=","](includedPermissions)' 2>/dev/null || true)"
+  # Compare the DESCRIPTION too, not just permissions: a role whose description goes stale
+  # (or predates provenance) would otherwise never be corrected — the audit of 2026-08-30
+  # found exactly that.
+  live_desc="$(g iam roles describe "$id" --project="$proj" \
+                --format='value(description)' 2>/dev/null || true)"
   want="$(printf '%s' "$perms" | tr ',' '\n' | sort | tr '\n' ' ')"
   if [ -z "$live" ]; then
     do_or_dry g iam roles create "$id" --project="$proj" --title="$title" \
       --description="$desc" --permissions="$perms" --stage=GA >/dev/null && add "custom role $id"
-  elif [ "$(printf '%s' "$live" | tr ',' '\n' | sort | tr '\n' ' ')" != "$want" ]; then
+  elif [ "$(printf '%s' "$live" | tr ',' '\n' | sort | tr '\n' ' ')" != "$want" ] \
+       || [ "$live_desc" != "$desc" ]; then
     # Reconcile: the role exists but its permissions have drifted from this definition.
     do_or_dry g iam roles update "$id" --project="$proj" --title="$title" \
       --description="$desc" --permissions="$perms" --stage=GA >/dev/null \
-      && add "custom role $id (permissions synced)"
+      && add "custom role $id (metadata synced)"
   else
     ok "custom role $id"
   fi
@@ -221,31 +235,63 @@ ensure_host(){
 
   # 2) fleet WIF pool
   if g iam workload-identity-pools describe "$POOL_ID" --project="$HOST_PROJECT" --location=global >/dev/null 2>&1; then
-    ok "wif pool $POOL_ID"
+    # RECONCILE, don't just create: these were created before provenance existed, so the
+    # live pool carries an empty description. A create-only fix would never reach it.
+    _want="Fleet WIF pool — one trust anchor for every project in the reach | $PROVENANCE"
+    _have="$(g iam workload-identity-pools describe "$POOL_ID" --project="$HOST_PROJECT" \
+              --location=global --format='value(description)' 2>/dev/null || true)"
+    if [ "$_have" != "$_want" ]; then
+      do_or_dry g iam workload-identity-pools update "$POOL_ID" --project="$HOST_PROJECT" \
+        --location=global --description="$_want" >/dev/null && add "wif pool $POOL_ID (description synced)"
+    else
+      ok "wif pool $POOL_ID"
+    fi
   else
     do_or_dry g iam workload-identity-pools create "$POOL_ID" --project="$HOST_PROJECT" --location=global \
-      --display-name="JGD fleet provisioner"
+      --display-name="JGD fleet provisioner" \
+      --description="Fleet WIF pool — one trust anchor for every project in the reach | $PROVENANCE"
     add "wif pool $POOL_ID"
   fi
 
   # 3) fleet OIDC provider — trust GitHub, restrict to EXACTLY the config repo
   if g iam workload-identity-pools providers describe "$PROVIDER_ID" --project="$HOST_PROJECT" --location=global \
        --workload-identity-pool="$POOL_ID" >/dev/null 2>&1; then
-    ok "wif provider $PROVIDER_ID"
+    _want="OIDC provider — only ${PROVISIONER_REPO} may mint tokens here. | $PROVENANCE"
+    _have="$(g iam workload-identity-pools providers describe "$PROVIDER_ID" \
+              --project="$HOST_PROJECT" --location=global --workload-identity-pool="$POOL_ID" \
+              --format='value(description)' 2>/dev/null || true)"
+    if [ "$_have" != "$_want" ]; then
+      do_or_dry g iam workload-identity-pools providers update-oidc "$PROVIDER_ID" \
+        --project="$HOST_PROJECT" --location=global --workload-identity-pool="$POOL_ID" \
+        --description="$_want" >/dev/null && add "wif provider $PROVIDER_ID (description synced)"
+    else
+      ok "wif provider $PROVIDER_ID"
+    fi
   else
     do_or_dry g iam workload-identity-pools providers create-oidc "$PROVIDER_ID" \
       --project="$HOST_PROJECT" --location=global --workload-identity-pool="$POOL_ID" \
       --issuer-uri="$GITHUB_ISSUER" \
       --attribute-mapping="google.subject=assertion.sub,attribute.repository=assertion.repository,attribute.repository_owner=assertion.repository_owner" \
-      --attribute-condition="assertion.repository=='${PROVISIONER_REPO}'"
+      --attribute-condition="assertion.repository=='${PROVISIONER_REPO}'" \
+      --display-name="$PROVIDER_ID" \
+      --description="OIDC provider — only ${PROVISIONER_REPO} may mint tokens here. | $PROVENANCE"
     add "wif provider $PROVIDER_ID (repo-scoped: $PROVISIONER_REPO)"
   fi
 
   # 4) fleet SA
   if g iam service-accounts describe "$FLEET_SA" --project="$HOST_PROJECT" >/dev/null 2>&1; then
-    ok "sa $FLEET_SA"
+    _want="One keyless WIF access/identity broker for the whole fleet | $PROVENANCE"
+    _have="$(g iam service-accounts describe "$FLEET_SA" --project="$HOST_PROJECT" \
+              --format='value(description)' 2>/dev/null || true)"
+    if [ "$_have" != "$_want" ]; then
+      do_or_dry g iam service-accounts update "$FLEET_SA" --project="$HOST_PROJECT" \
+        --description="$_want" >/dev/null && add "sa $FLEET_SA (description synced)"
+    else
+      ok "sa $FLEET_SA"
+    fi
   else
-    do_or_dry g iam service-accounts create "$SA_ID" --project="$HOST_PROJECT" --display-name="$SA_DISPLAY"
+    do_or_dry g iam service-accounts create "$SA_ID" --project="$HOST_PROJECT" --display-name="$SA_DISPLAY" \
+      --description="One keyless WIF access/identity broker for the whole fleet | $PROVENANCE"
     add "sa $FLEET_SA"
   fi
 
@@ -361,18 +407,24 @@ SCOPE_READER_PERMS="resourcemanager.organizations.get,resourcemanager.organizati
 ensure_scope_reader_role(){ # org_id
   local org="$1" live want
   local title="JGD Scope IAM Viewer"
-  local desc="READ-ONLY view of org/folder IAM so --prune can DETECT drift on the fleet provisioner. Deliberately no setIamPolicy: the policed identity must never rewrite its own grants."
+  local desc="READ-ONLY view of org/folder IAM so --prune can DETECT drift on the fleet provisioner. Deliberately no setIamPolicy: the policed identity must never rewrite its own grants. | $PROVENANCE"
   live="$(g iam roles describe "$SCOPE_READER_ROLE_ID" --organization="$org" \
             --format='value[delimiter=","](includedPermissions)' 2>/dev/null || true)"
+  # Compare the DESCRIPTION too, not just permissions: a role whose description goes stale
+  # (or predates provenance) would otherwise never be corrected — the audit of 2026-08-30
+  # found exactly that.
+  live_desc="$(g iam roles describe "$SCOPE_READER_ROLE_ID" --organization="$org" \
+                --format='value(description)' 2>/dev/null || true)"
   want="$(printf '%s' "$SCOPE_READER_PERMS" | tr ',' '\n' | sort | tr '\n' ' ')"
   if [ -z "$live" ]; then
     do_or_dry g iam roles create "$SCOPE_READER_ROLE_ID" --organization="$org" --title="$title" \
       --description="$desc" --permissions="$SCOPE_READER_PERMS" --stage=GA >/dev/null \
       && add "custom role $SCOPE_READER_ROLE_ID (org $org)"
-  elif [ "$(printf '%s' "$live" | tr ',' '\n' | sort | tr '\n' ' ')" != "$want" ]; then
+  elif [ "$(printf '%s' "$live" | tr ',' '\n' | sort | tr '\n' ' ')" != "$want" ] \
+       || [ "$live_desc" != "$desc" ]; then
     do_or_dry g iam roles update "$SCOPE_READER_ROLE_ID" --organization="$org" --title="$title" \
       --description="$desc" --permissions="$SCOPE_READER_PERMS" --stage=GA >/dev/null \
-      && add "custom role $SCOPE_READER_ROLE_ID (permissions synced)"
+      && add "custom role $SCOPE_READER_ROLE_ID (metadata synced)"
   else
     ok "custom role $SCOPE_READER_ROLE_ID"
   fi

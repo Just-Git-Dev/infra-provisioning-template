@@ -91,6 +91,28 @@ def sa_user_members(project, email):
     return [m for m in out.splitlines() if m]
 
 
+# Every resource this engine creates says WHO manages it. Without this a console reader
+# cannot tell a config-managed SA from a hand-made one, and edits it by hand — which the
+# next apply silently reverts. Audited 2026-08-30: provenance was determinable for zero
+# resources in the fleet.
+PROVENANCE = "Managed by the infra-provisioning config repo — edit projects/*/config.yaml, not the console."
+
+# GCP limits: displayName 100 BYTES, description 256 BYTES. Both truncate on the byte
+# string, dropping any partial trailing multibyte char (a raw [:n] on a description
+# containing an em-dash fails create with INVALID_ARGUMENT).
+_DISPLAY_NAME_MAX = 100
+_DESCRIPTION_MAX = 256
+
+
+def _clip(s, limit):
+    return s.encode("utf-8")[:limit].decode("utf-8", "ignore")
+
+
+def _described(purpose):
+    """A description that carries both purpose and provenance, within the byte limit."""
+    return _clip(f"{purpose} | {PROVENANCE}" if purpose else PROVENANCE, _DESCRIPTION_MAX)
+
+
 PROVISIONER_SA = "infra-provisioner"   # anchor-owned SA (not declared in configs)
 
 # Mirrors SCOPE_READER_ROLE_ID in bootstrap/fleet-anchor.sh; kept in sync by
@@ -122,15 +144,26 @@ def ensure_service_accounts(cfg, project):
     print("service_accounts:")
     for sa in cfg.get("service_accounts", []):
         name, email = sa["name"], sa_email(sa["name"], project)
-        if gout(["iam", "service-accounts", "describe", email], project):
-            c("ok", f"sa {email}")
+        purpose = sa.get("description", "")
+        want_dn = _clip(purpose or name, _DISPLAY_NAME_MAX)
+        want_desc = _described(purpose)
+        live = gout(["iam", "service-accounts", "describe", email,
+                     "--format=value[delimiter=\u001f](displayName,description)"], project)
+        if live:
+            # RECONCILE, don't just create. Metadata used to be written at create only, so a
+            # config `description:` edit never reached GCP and displayNames silently went
+            # stale (six SAs were found still carrying their bare id — audit 2026-08-30).
+            have_dn, _, have_desc = live.partition("\u001f")
+            if have_dn.strip() != want_dn or have_desc.strip() != want_desc:
+                do(["iam", "service-accounts", "update", email,
+                    f"--display-name={want_dn}", f"--description={want_desc}"],
+                   project, f"  sync metadata on {email}")
+            else:
+                c("ok", f"sa {email}")
         else:
-            # GCP displayName limit is 100 *bytes*, not chars: truncate on the byte
-            # string and drop any partial trailing multibyte char (else create fails
-            # with INVALID_ARGUMENT on descriptions containing e.g. an em-dash).
-            display_name = sa.get("description", name).encode("utf-8")[:100].decode("utf-8", "ignore")
             do(["iam", "service-accounts", "create", name,
-                f"--display-name={display_name}"], project, f"create sa {email}")
+                f"--display-name={want_dn}", f"--description={want_desc}"],
+               project, f"create sa {email}")
         for role in sa.get("roles", []):
             role = _qualify(role)
             if sa_has_role(project, email, role):
@@ -154,7 +187,9 @@ def ensure_wif(cfg, project):
         c("ok", f"pool {pool}")
     else:
         do(["iam", "workload-identity-pools", "create", pool, "--location=global",
-            f"--display-name={pool}"], project, f"create pool {pool}")
+            f"--display-name={_clip(pool, _DISPLAY_NAME_MAX)}",
+            f"--description={_described('App-repo GitHub Actions WIF pool')}"],
+           project, f"create pool {pool}")
     if provider:
         if gout(["iam", "workload-identity-pools", "providers", "describe", provider,
                  "--location=global", f"--workload-identity-pool={pool}"], project):
@@ -164,7 +199,9 @@ def ensure_wif(cfg, project):
                 "--location=global", f"--workload-identity-pool={pool}",
                 "--issuer-uri=https://token.actions.githubusercontent.com",
                 "--attribute-mapping=google.subject=assertion.sub,attribute.repository=assertion.repository,attribute.repository_owner=assertion.repository_owner",
-                f"--attribute-condition=assertion.repository_owner=='{org}'"],
+                f"--attribute-condition=assertion.repository_owner=='{org}'",
+                f"--display-name={_clip(provider, _DISPLAY_NAME_MAX)}",
+                f"--description={_described(f'OIDC provider for GitHub org {org}')}"],
                project, f"create provider {provider} (org-scoped: {org})")
     for sa in cfg.get("service_accounts", []):
         for repo in sa.get("wif_repos") or []:

@@ -38,7 +38,9 @@ def test_service_account_role_present_vs_missing():
     def gmap(args):
         j = " ".join(args)
         if "describe" in args:
-            return "exists"                       # SA exists
+            # displayName \x1f description, exactly as the engine asks gcloud to format it,
+            # and already matching what the config wants -- so no metadata sync is planned.
+            return "sa1\x1f" + P._described("")
         if "run.admin" in j:
             return "roles/run.admin"              # role present
         return ""                                  # pubsub.admin missing
@@ -649,6 +651,64 @@ class _Ok:
     returncode = 0
     stdout = ""
     stderr = ""
+
+
+def _capture(handler, cfg, gout_map, project="p"):
+    """Run a handler for REAL (not dry-run) against stubs, returning the gcloud argv lists.
+    Dry-run prints only the human label, never the args, so anything asserting on FLAGS
+    (metadata, conditions) has to inspect the calls themselves."""
+    calls = []
+    core.DRY = False
+    P.gout = lambda args, project=None: gout_map(args)
+    P.gcloud = lambda args, project=None, check=True: calls.append(args) or _Ok()
+    buf = io.StringIO()
+    try:
+        with redirect_stdout(buf):
+            handler(cfg, project)
+    finally:
+        core.DRY = True
+    return calls
+
+
+def test_service_account_metadata_is_reconciled_not_only_created():
+    """Metadata used to be written at create ONLY, so editing a config's `description:`
+    never reached GCP: an audit found six SAs still carrying their bare id as displayName
+    while the config described them properly. An existing SA whose metadata has drifted
+    must be UPDATED, not reported ok."""
+    cfg = {"service_accounts": [{"name": "sa1", "description": "CI releaser (owner: platform)",
+                                 "roles": []}]}
+    calls = _capture(P.ensure_service_accounts, cfg,
+                     lambda args: "sa1\x1f" if "describe" in args else "")
+    upd = [a for a in calls if "update" in a]
+    assert upd, "drifted metadata was not updated: %s" % calls
+    flat = " ".join(upd[0])
+    assert "CI releaser (owner: platform)" in flat, flat
+    assert P.PROVENANCE in flat, flat
+
+
+def test_every_created_resource_carries_provenance():
+    """A console reader must be able to tell what manages a resource. Audited 2026-08-30:
+    provenance was determinable for ZERO resources in the fleet."""
+    sa = _capture(P.ensure_service_accounts,
+                  {"service_accounts": [{"name": "newsa", "roles": []}]}, lambda args: "")
+    wif = _capture(P.ensure_wif,
+                   {"project": {"github_org": "AutoMahn", "gcp_number": "42"},
+                    "wif": {"pool": "github-actions", "provider": "github"}},
+                   lambda args: "")
+    creates = [a for a in sa + wif if "create" in a or "create-oidc" in a]
+    assert creates, "nothing was created"
+    for a in creates:
+        flat = " ".join(a)
+        assert P.PROVENANCE in flat, "created without provenance: %s" % flat
+        assert "--display-name=" in flat, "created without a displayName: %s" % flat
+
+
+def test_description_is_clipped_on_bytes_not_characters():
+    """256-byte limit. A raw [:n] on a multibyte string fails create with INVALID_ARGUMENT."""
+    long_purpose = "\u2014" * 300          # em-dashes: 3 bytes each
+    got = P._described(long_purpose)
+    assert len(got.encode("utf-8")) <= P._DESCRIPTION_MAX, len(got.encode("utf-8"))
+    got.encode("utf-8").decode("utf-8")   # must not be a partial trailing char
 
 
 if __name__ == "__main__":
