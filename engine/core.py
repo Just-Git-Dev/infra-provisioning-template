@@ -27,6 +27,12 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DRY = True          # set by the CLI (provision.py): DRY = not --apply
 _TTY = sys.stdout.isatty()
 
+# Mutations REPORTED this run — planned ones in dry-run, performed ones under --apply.
+# `do`/`undo` are the only places a mutation is ever printed, so counting here is what
+# keeps the closing summary consistent with the plan above it by construction. Reset by
+# provision.run(); a caller driving the engine in-process must reset it too.
+MUTATIONS = 0
+
 
 def c(tag, msg):
     col = {"ok": "32", "add": "33", "dry": "36", "err": "31", "skip": "90", "del": "35"}.get(tag, "0")
@@ -37,25 +43,31 @@ def c(tag, msg):
 def do(run, describe):
     """Mutating (additive) op — withheld in dry-run. `run` is a 0-arg callable
     that performs the mutation (a provider closes over its own CLI call)."""
+    global MUTATIONS
     if DRY:
+        MUTATIONS += 1
         c("dry", f"would {describe}")
         return
     try:
         run()
     except subprocess.CalledProcessError as e:
         sys.exit(f"failed to {describe}:\n{(e.stderr or '').strip()}")
+    MUTATIONS += 1
     c("add", describe)
 
 
 def undo(run, describe):
     """Destructive (removal) op — withheld in dry-run. Used by --prune."""
+    global MUTATIONS
     if DRY:
+        MUTATIONS += 1
         c("dry", f"would {describe}")
         return
     try:
         run()
     except subprocess.CalledProcessError as e:
         sys.exit(f"failed to {describe}:\n{(e.stderr or '').strip()}")
+    MUTATIONS += 1
     c("del", describe)
 
 

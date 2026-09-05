@@ -69,6 +69,7 @@ def config_root():
 
 def run(project_key, apply=False, only=None, prune=False):
     core.DRY = not apply
+    core.MUTATIONS = 0
     cfg_path = os.path.join(config_root(), "projects", project_key, "config.yaml")
     if not os.path.exists(cfg_path):
         sys.exit(f"no config at {cfg_path}")
@@ -90,10 +91,18 @@ def run(project_key, apply=False, only=None, prune=False):
             print()
             registry[name](target, ctx)
 
-    tail = ("prune dry-run complete — no removals." if prune and core.DRY else
-            "prune complete." if prune else
-            "dry-run complete — no changes." if core.DRY else "apply complete.")
-    print("\n" + tail)
+    # The trailer is DERIVED from what was actually reported, never asserted independently:
+    # a fixed string here can contradict the plan above it, and a reader who trusts the
+    # summary over the body then draws the opposite conclusion (see DECISIONS 2026-09-05).
+    n = core.MUTATIONS
+    noun = "removal" if prune else "change"
+    count = f"no {noun}s" if n == 0 else f"{n} {noun}" + ("" if n == 1 else "s")
+    verb = "planned" if core.DRY else "applied"
+    if core.DRY:
+        label = "prune dry-run" if prune else "dry-run"
+    else:
+        label = "prune" if prune else "apply"
+    print(f"\n{label} complete — {count} {verb}.")
 
 
 def main():

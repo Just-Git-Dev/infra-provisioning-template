@@ -738,6 +738,88 @@ def test_metadata_reconcile_tolerates_a_trailing_space_from_clipping():
         "trailing-space clip planned a needless update: %s" % calls
 
 
+def _drive_run(tmpdir, plan, prune=False, apply=False):
+    """Run provision.run() end-to-end against a stub provider, and return its full stdout.
+
+    The trailer is only observable from a whole run, so these tests drive the CLI
+    orchestration rather than a single handler. `plan` is a 0-arg callable that stands in
+    for a subsystem: it calls core.do/core.undo to declare what the run would change.
+    """
+    import provision
+
+    os.makedirs(os.path.join(tmpdir, "projects", "p"), exist_ok=True)
+    with open(os.path.join(tmpdir, "projects", "p", "config.yaml"), "w") as fh:
+        fh.write("project_id: stub\n")
+
+    class _Stub:
+        HANDLERS = {"sub": lambda target, ctx: plan()}
+        PRUNERS = {"sub": lambda target, ctx: plan()}
+        context = staticmethod(lambda target: "ctx")
+        preflight = staticmethod(lambda ctx: True)
+        label = staticmethod(lambda key, target, ctx: f"project: {key}")
+
+    orig_providers, orig_root = provision.PROVIDERS, os.environ.get("PROVISION_CONFIG_ROOT")
+    provision.PROVIDERS = {"gcp": _Stub}
+    os.environ["PROVISION_CONFIG_ROOT"] = tmpdir
+    buf = io.StringIO()
+    try:
+        with redirect_stdout(buf):
+            provision.run("p", apply=apply, prune=prune)
+    finally:
+        provision.PROVIDERS = orig_providers
+        os.environ.pop("PROVISION_CONFIG_ROOT", None)
+        if orig_root is not None:
+            os.environ["PROVISION_CONFIG_ROOT"] = orig_root
+        core.DRY = True
+    return buf.getvalue()
+
+
+def test_prune_dry_run_trailer_reports_the_removals_it_planned():
+    """REGRESSION: the trailer said 'no removals' while the body planned one.
+
+    Observed on infra-provisioning run 33943386538 — the plan printed
+    `~ would unbind roles/artifactregistry.repoAdmin from github-cleaner` and the run still
+    closed with 'prune dry-run complete — no removals.' A reader trusting the summary would
+    conclude the prune was a no-op and skip it.
+    """
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        out = _drive_run(td, lambda: core.undo(lambda: None, "unbind roles/x from sa"), prune=True)
+    assert "would unbind roles/x" in out, out
+    assert "no removals" not in out, \
+        "trailer claims no removals while the body planned one:\n%s" % out
+    assert "1 removal" in out, out
+
+
+def test_dry_run_trailer_reports_the_changes_it_planned():
+    """Same defect on the additive branch: 'dry-run complete — no changes.' was printed
+    unconditionally, including on the run that planned the artifactregistry.admin bind."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        out = _drive_run(td, lambda: core.do(lambda: None, "bind roles/x to sa"))
+    assert "would bind roles/x" in out, out
+    assert "no changes" not in out, \
+        "trailer claims no changes while the body planned one:\n%s" % out
+    assert "1 change" in out, out
+
+
+def test_trailers_still_say_none_when_nothing_is_planned():
+    """The zero case must keep reading as zero — the fix must not invert the bug."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        assert "no removals" in _drive_run(td, lambda: None, prune=True)
+        assert "no changes" in _drive_run(td, lambda: None)
+
+
+def test_mutation_count_does_not_leak_between_runs():
+    """The counter is module state, so a second run must not inherit the first one's total."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        _drive_run(td, lambda: core.do(lambda: None, "bind roles/x to sa"))
+        second = _drive_run(td, lambda: None)
+    assert "no changes" in second, "count leaked into the next run:\n%s" % second
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0
