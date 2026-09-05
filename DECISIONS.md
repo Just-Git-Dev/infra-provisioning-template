@@ -5,6 +5,7 @@ the alternatives were. Newest first.
 
 ## Index
 
+- [2026-09-05 — RCA: the run trailer was a fixed string, so it contradicted the plan above it](#2026-09-05--rca-the-run-trailer-was-a-fixed-string-so-it-contradicted-the-plan-above-it)
 - [2026-08-24 — `resource_roles` grows pub/sub and Artifact Registry kinds](#2026-08-24--resource_roles-grows-pubsub-and-artifact-registry-kinds)
 - [2026-08-24 — RCA: the engine test runner sat mid-file, so 20 of 37 tests never ran](#2026-08-24--rca-the-engine-test-runner-sat-mid-file-so-20-of-37-tests-never-ran)
 - [2026-08-23 — RCA: a dry-run anchor printed `+`, so it read as if it had changed something](#2026-08-23--rca-a-dry-run-anchor-printed--so-it-read-as-if-it-had-changed-something)
@@ -16,6 +17,42 @@ the alternatives were. Newest first.
 - [2026-08-20 — port the two mutation-path engine fixes from the consumer; release v1.0.1](#2026-08-20--port-the-two-mutation-path-engine-fixes-from-the-consumer-release-v101)
 
 ---
+
+## 2026-09-05 — RCA: the run trailer was a fixed string, so it contradicted the plan above it
+
+**Symptom.** A prune dry-run planned a removal and then closed by denying it. On
+infra-provisioning run 33943386538 the body printed
+`~ would unbind roles/artifactregistry.repoAdmin from github-cleaner` and the last line read
+`prune dry-run complete — no removals.` The additive branch had the same defect: run
+33943215546 planned `~ would bind roles/artifactregistry.admin → github-cleaner` and closed
+`dry-run complete — no changes.` An operator who trusts the summary over the body concludes the
+prune is a no-op and skips it — and skipping *this* prune would have stranded a binding, because
+removing the role from the allow-list first makes it undeletable by the fleet SA.
+
+**Root cause.** `provision.run()` selected the trailer from `prune`/`DRY` alone
+(`provision.py:93`) — the flags describing what the run was *asked* to do — with no reference to
+what it actually reported. The phrase "no removals" was therefore never a finding; it was a
+label on a mode, and it was printed identically whether zero or fifty removals were planned. The
+originating mistake is asserting an outcome next to the evidence rather than deriving it from
+the evidence.
+
+**Why it wasn't caught.** The test suite drove handlers directly (`drive()` calls one handler
+and asserts its printed lines) and never called `provision.run()`, so no test had ever observed
+a trailer. The output was also self-consistent in the common case — most runs genuinely plan
+nothing, so the string was right for the wrong reason on almost every run anyone looked at.
+
+**Fix.** `core.do`/`core.undo` are the only places a mutation is ever printed, so they now
+increment `core.MUTATIONS`; `run()` resets it and derives the trailer from the count
+(`prune dry-run complete — 1 removal planned.`). This makes the summary consistent with the body
+*by construction* rather than by the author remembering to keep them in step — the same
+correction as the [2026-08-23 dry-run anchor
+RCA](#2026-08-23--rca-a-dry-run-anchor-printed--so-it-read-as-if-it-had-changed-something),
+where reporting also drifted from what the run had done.
+
+**Prevention.** Four tests, driving `provision.run()` end-to-end against a stub provider — the
+outermost level where a trailer is observable. Two are the red repros (one per branch), one
+pins the zero case so the fix cannot simply invert the bug, and one guards the counter against
+leaking between runs, since it is module state.
 
 ## 2026-08-24 — `resource_roles` grows pub/sub and Artifact Registry kinds
 
