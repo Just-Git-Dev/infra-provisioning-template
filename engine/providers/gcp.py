@@ -7,6 +7,8 @@ Manages exactly four access subsystems (idempotent, plan-first):
   - act_as           : SA→SA impersonation (roles/iam.serviceAccountUser) between our SAs
   - resource_roles   : roles bound on a SINGLE resource (a secret, one SA) instead of
                        project-wide — the least-privilege alternative to a project role
+  - principals       : a HUMAN/GROUP member granted a role ON one of our SAs (the mirror of
+                       resource_roles: who may assume this SA, rather than what it may reach)
   - wif              : the app-repo WIF pool/provider + per-SA impersonation bindings
 
 Everything else a project needs (enabling APIs, creating secrets, pub/sub topics,
@@ -436,10 +438,155 @@ def prune_resource_roles(cfg, project):
         c("ok", "no extra resource_roles bindings")
 
 
+# ── principals: a HUMAN/GROUP member on one of our service accounts (ADR-008) ─
+# resource_roles asks "what may this SA reach"; principals asks the mirror question, "who may
+# assume this SA". It is a SEPARATE top-level block rather than a member type inside
+# resource_roles because resource_roles is nested UNDER the SA that receives the access, and a
+# human has no owning SA to nest under — and because prune_resource_roles' safety rule ("only
+# ever touch a member that is an SA THIS config declares") is what makes it safe to run against
+# a live project. Admitting humans there would have to weaken exactly that rule.
+#
+#   principals:                                    # TOP-LEVEL, not under a service account
+#     - member: user:someone@example.com           # or group:log-readers@example.com
+#       resource_roles:
+#         service_accounts:
+#           log-reader: [iam.serviceAccountTokenCreator]
+#
+# NOTHING IN IAM ENFORCES THE NARROWNESS BELOW. modifiedGrantsByRole — the condition behind
+# grantable-roles.txt — covers project/folder/org allow policies only; a service-account
+# resource policy has no equivalent attribute, so the provisioner's iam.serviceAccountAdmin is
+# unconditioned here. The allow-list file, these checks and the reviewer are the only controls.
+_PRINCIPAL_KIND = "service_accounts"      # deliberately the ONLY kind open to a human
+_PRINCIPAL_PREFIXES = ("user:", "group:")
+
+
+def principal_grantable_roles():
+    """Roles a human/group principal may be granted on an SA — read from the shared file, the
+    same way provisioner_kept_roles() reads its own. Resolved against core.ROOT (this engine's
+    checkout), which at run time is the action path, NOT the caller's config root."""
+    path = os.path.join(core.ROOT, "bootstrap", "principal-grantable-roles.txt")
+    roles = set()
+    with open(path) as fh:
+        for line in fh:
+            line = line.split("#", 1)[0].strip()
+            if line:
+                roles.add(_qualify(line))
+    return roles
+
+
+def _declared_principals(cfg, project):
+    """[(member, kind, resource_name, ref, [qualified roles]), ...] in declaration order.
+
+    Validates as it goes and exits loud on anything it cannot safely bind — at PLAN time, so a
+    bad config never reaches a live setIamPolicy."""
+    allowed = principal_grantable_roles()
+    out = []
+    for entry in cfg.get("principals") or []:
+        member = (entry or {}).get("member")
+        if not member:
+            raise SystemExit("principals: an entry has no `member`")
+        if member.startswith("serviceAccount:"):
+            raise SystemExit(
+                f"principals: {member!r} is a service account. Service-account grants are "
+                f"declared under that SA's own `resource_roles:`, which the pruner can reason "
+                f"about; `principals:` is for human and group members only.")
+        if not member.startswith(_PRINCIPAL_PREFIXES):
+            raise SystemExit(
+                f"principals: member {member!r} has no principal prefix. Write "
+                f"'user:{member}' or 'group:{member}' — a bare string is passed to gcloud "
+                f"verbatim and would bind something unintended.")
+        for kind, resources in (entry.get("resource_roles") or {}).items():
+            if kind != _PRINCIPAL_KIND:
+                raise SystemExit(
+                    f"principals: {member} declares kind {kind!r}. Human principals may only "
+                    f"be bound on '{_PRINCIPAL_KIND}' — opening another kind is a decision "
+                    f"(ADR-008), not a config edit.")
+            spec = _RESOURCE_KINDS[kind]
+            for name, roles in (resources or {}).items():
+                qualified = [_qualify(r) for r in (roles or [])]
+                for role in qualified:
+                    if role not in allowed:
+                        raise SystemExit(
+                            f"principals: {member} would be granted {role} on {name}, which is "
+                            f"not in bootstrap/principal-grantable-roles.txt. IAM will NOT "
+                            f"refuse this binding — that file is the control, so widening it "
+                            f"is a reviewed change (ADR-008 §4).")
+                out.append((member, kind, name, spec["ref"](name, project), qualified))
+    return out
+
+
+def ensure_principals(cfg, project):
+    print("principals:")
+    declared = _declared_principals(cfg, project)
+    if not declared:
+        c("skip", "no principals declared")
+        return
+    for member, kind, name, ref, roles in declared:
+        spec = _RESOURCE_KINDS[kind]
+        if not gout(spec["args"]("describe", ref, project)):
+            # Same fail-loud rule as ensure_resource_roles: we BIND, never create. A silent
+            # skip would make a clean plan a lie about access that does not exist.
+            raise SystemExit(
+                f"principals: {spec['noun']} {name!r} does not exist in {project}. Declare it "
+                f"under `service_accounts:` and apply that first — this block binds on an SA, "
+                f"it never creates one.")
+        held = {r for r, m in resource_policy(kind, ref, project) if m == member}
+        for role in roles:
+            if role in held:
+                c("ok", f"  {spec['noun']} {name}: {role} → {member}")
+            else:
+                do(spec["args"]("add-iam-policy-binding", ref, project) +
+                   [f"--member={member}", f"--role={role}"],
+                   project, f"  bind {role} on {spec['noun']} {name} → {member}")
+
+
+def prune_principals(cfg, project):
+    """Remove human/group bindings this config no longer declares — and ONLY on the members
+    and resources it names.
+
+    Conservative in the same shape as prune_act_as and prune_resource_roles: a binding is
+    touched only when the MEMBER, the RESOURCE and the role are all config-declared. Another
+    person's grant on the same SA survives, and so does every `serviceAccount:` member —
+    those belong to prune_act_as / prune_resource_roles, and double-owning a binding is how a
+    pruner tears down a grant a different subsystem legitimately declares.
+
+    No `_FOREIGN_ROLES` exemption is needed here: act_as and wif bind service accounts only,
+    so a serviceAccountUser/workloadIdentityUser binding held by a HUMAN this config declares
+    is owned by no other subsystem and is genuinely undeclared."""
+    print("prune principals:")
+    declared = _declared_principals(cfg, project)
+    if not declared:
+        c("skip", "no principals declared")
+        return
+    members = {m for m, _k, _n, _r, _roles in declared}
+    wanted = {(kind, name, role, member)
+              for member, kind, name, _ref, roles in declared for role in roles}
+    seen, extra = set(), False
+    for _member, kind, name, ref, _roles in declared:
+        if (kind, name) in seen:          # a resource may be named by several principals
+            continue
+        seen.add((kind, name))
+        spec = _RESOURCE_KINDS[kind]
+        for role, member in resource_policy(kind, ref, project):
+            if member not in members:                          # unmanaged member → keep
+                continue
+            if (kind, name, role, member) in wanted:           # declared → keep
+                continue
+            extra = True
+            undo(spec["args"]("remove-iam-policy-binding", ref, project) +
+                 [f"--member={member}", f"--role={role}"],
+                 project, f"unbind {role} on {spec['noun']} {name} from {member}")
+    if not extra:
+        c("ok", "no extra principals bindings")
+
+
 HANDLERS = {
     "service_accounts": ensure_service_accounts,
     "act_as": ensure_act_as,
     "resource_roles": ensure_resource_roles,
+    # AFTER service_accounts — dict order is run order (provision.run), and this binds ON an
+    # SA, so the SA has to exist first on a fresh project.
+    "principals": ensure_principals,
     "wif": ensure_wif,
 }
 
@@ -590,6 +737,7 @@ PRUNERS = {
     "service_accounts": prune_service_accounts,
     "act_as": prune_act_as,
     "resource_roles": prune_resource_roles,
+    "principals": prune_principals,
     "provisioner": prune_provisioner,
 }
 

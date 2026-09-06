@@ -64,6 +64,21 @@ targets:
         description: "Runtime identity for the app"
         roles: [cloudtrace.agent, logging.logWriter]
 
+    # A HUMAN or GROUP granted a role ON one of the SAs above — the mirror of resource_roles
+    # (what the SA may reach) — so a person can impersonate it instead of using their own,
+    # far wider, identity. Top-level within the target, NOT nested under a service account:
+    # a human has no owning SA. See the README's `principals` section.
+    principals:
+      - member: user:someone@example.com                   # or group:log-readers@example.com
+        resource_roles:
+          service_accounts:
+            your-app-run: [iam.serviceAccountTokenCreator] # `--impersonate-service-account`
+        # Narrow on purpose, all three enforced at PLAN time: kind must be service_accounts,
+        # the member must carry a user:/group: prefix, and the role must appear in
+        # bootstrap/principal-grantable-roles.txt. Note that last one is a FILE, not an IAM
+        # condition — IAM does not constrain service-account resource policies, so widening
+        # that file is the whole risk surface here.
+
     wif:
       pool:     github-actions            # app-repo WIF pool (distinct from the anchor's jgd-*-pool)
       provider: github                    # OIDC provider under that pool (org-scoped to github_org)

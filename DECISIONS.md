@@ -5,6 +5,7 @@ the alternatives were. Newest first.
 
 ## Index
 
+- [2026-09-06 — `principals`: a human/group member on one service account, guarded by a file rather than by IAM](#2026-09-06--principals-a-humangroup-member-on-one-service-account-guarded-by-a-file-rather-than-by-iam)
 - [2026-09-05 — RCA: the run trailer was a fixed string, so it contradicted the plan above it](#2026-09-05--rca-the-run-trailer-was-a-fixed-string-so-it-contradicted-the-plan-above-it)
 - [2026-08-24 — `resource_roles` grows pub/sub and Artifact Registry kinds](#2026-08-24--resource_roles-grows-pubsub-and-artifact-registry-kinds)
 - [2026-08-24 — RCA: the engine test runner sat mid-file, so 20 of 37 tests never ran](#2026-08-24--rca-the-engine-test-runner-sat-mid-file-so-20-of-37-tests-never-ran)
@@ -15,6 +16,57 @@ the alternatives were. Newest first.
 - [2026-08-21 — caller inputs move to `env:`; CI grows actionlint and lints `action.yml` itself](#2026-08-21--caller-inputs-move-to-env-ci-grows-actionlint-and-lints-actionyml-itself)
 - [2026-08-20 — SHA-pin this repo's own actions and enforce it in CI](#2026-08-20--sha-pin-this-repos-own-actions-and-enforce-it-in-ci)
 - [2026-08-20 — port the two mutation-path engine fixes from the consumer; release v1.0.1](#2026-08-20--port-the-two-mutation-path-engine-fixes-from-the-consumer-release-v101)
+
+---
+
+## 2026-09-06 — `principals`: a human/group member on one service account, guarded by a file rather than by IAM
+
+**What.** A new top-level `principals:` block, one handler (`ensure_principals`) and one pruner
+(`prune_principals`), plus `bootstrap/principal-grantable-roles.txt` seeded with exactly
+`roles/iam.serviceAccountTokenCreator`.
+
+**Why.** Every member this provider built was `serviceAccount:{email}` — `ensure_act_as`,
+`ensure_wif`, `ensure_resource_roles` and both pruners. A human could therefore be granted
+nothing, which is how the consumer shipped three `log-reader` SAs that nobody could impersonate:
+`roles/owner` carries `iam.serviceAccounts.actAs` but **not** `getAccessToken`, so every
+`--impersonate-service-account` call returned PERMISSION_DENIED. The missing grant is
+`serviceAccountTokenCreator` for the person, bound *on* the SA.
+
+**Why not a one-time terminal grant in the consumer.** It would be invisible to the plan, not
+prunable, and not covered by "zero drift" — the exact failure `resource_roles` was added to end.
+
+**Why a separate block, not a member type inside `resource_roles`.** `resource_roles` is nested
+under the SA that *receives* the access; a human has no owning SA to nest under. More
+importantly, `prune_resource_roles`' safety rule — "only ever touch a member that is a service
+account THIS config declares" — is what makes it safe against a live project. Admitting humans
+would force that rule to grow a second clause inside the function whose blast radius is already
+the hardest to reason about. A separate pruner leaves it untouched and gives the new member type
+its own narrower rule.
+
+**The residual risk, stated rather than mitigated.** `grantable-roles.txt` is enforced by an IAM
+Condition (`modifiedGrantsByRole`) and a role missing from it is denied by GCP. That attribute
+covers **project/folder/org** allow policies only — a service-account resource policy has no
+equivalent, so a provisioner holding `iam.serviceAccountAdmin` is unconditioned here.
+`principal-grantable-roles.txt` is therefore a CI gate and a review artifact, not a security
+control: a config naming `roles/owner` under `principals` is caught by the consumer's
+`tests/test_configs.py`, by the reviewer, and by nothing else. This is the posture every
+resource-scoped SA binding has always had; what is new is a **human** on the receiving end,
+which is a genuine widening and the reason the allow-list starts at one role and the kind is
+restricted to `service_accounts`.
+
+**Alternatives rejected.** (a) No allow-list, rely on review alone — nothing then fails in CI, and
+the diff that widens this is exactly the diff that most needs a mechanical check. (b) Open all
+five `_RESOURCE_KINDS` to human principals — adding a kind later is a one-line change; opening
+them all in the same commit is not a decision anyone made. (c) Accept `group:` only, to force the
+group shape from day one — that blocks the immediate unblock on creating a group first; the
+schema accepts `group:` so the migration is a config edit when a second person needs access.
+
+**Guarded by.** `tests/test_engine.py` — twelve new cases, including
+`test_prune_principals_leaves_foreign_human_bindings` (two human subjects, so it cannot pass
+vacuously) and `test_principal_grantable_roles_is_seeded_with_exactly_token_creator`, which turns
+widening the file into a deliberate test edit. `test_handlers_are_access_only` was updated
+deliberately: growing that set is a scope decision by design. The scope line itself is unmoved —
+`principals` grants access and creates nothing. Full reasoning in the consumer's ADR-008.
 
 ---
 

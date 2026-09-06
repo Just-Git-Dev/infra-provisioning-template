@@ -113,6 +113,36 @@ because a silent skip would make a clean plan a lie. `--prune` removes undeclare
 declares, plus `deleted:` principals (residue an SA rename leaves behind — never a real grant).
 Humans, Google-managed service agents and SAs from other projects are never touched.
 
+### `principals` — grant a HUMAN or GROUP a role on one service account
+
+`resource_roles` answers "which resources may this **service account** reach". `principals`
+answers the mirror question: "which **human** may assume this service account". The two are
+separate blocks on purpose — `resource_roles` is nested *under* the SA that receives the
+access, and a human principal has no owning SA to nest under (see
+`docs/adr/ADR-008` in the consumer repo for the full reasoning).
+
+```yaml
+principals:                                     # TOP-LEVEL, not under a service account
+  - member: user:someone@example.com            # or group:log-readers@example.com
+    resource_roles:
+      service_accounts:
+        log-reader: [iam.serviceAccountTokenCreator]
+```
+
+Deliberately narrow, and it fails loud rather than widening quietly:
+
+- **Kind `service_accounts` only.** Secrets, pub/sub and GAR are not open to human principals.
+- **The role must appear in `bootstrap/principal-grantable-roles.txt`** — an allow-list seeded
+  with exactly `roles/iam.serviceAccountTokenCreator`. Anything else exits non-zero at plan time.
+- **The member must carry a `user:` or `group:` prefix.** A bare string would be handed to
+  `gcloud` and could bind something unintended; a `serviceAccount:` member belongs in
+  `resource_roles`, not here, and is rejected with that message.
+- **The target SA must already exist** — same fail-loud rule as `resource_roles`.
+
+`--prune principals` removes a binding only when the member, the resource **and** the role are
+all ones this config declares. A human binding the config does not mention — anyone else's
+grant on the same SA — is left alone.
+
 ## The engine (`engine/`)
 
 - `core.py` — provider-agnostic reconcile discipline: dry-run gate, `do()`/`undo()`,
@@ -151,6 +181,14 @@ Edit the `PROVISIONER_REPO` / `PROJECTS` placeholders (or set `PROVISIONER_REPO`
   the identity broker read every secret **payload** in the fleet. The custom role can neither
   create, delete, nor read a secret — only manage who may access one. The anchor scripts create
   and reconcile it.
+- **`principals` is guarded by a FILE, not by IAM.** `modifiedGrantsByRole` — the IAM Condition
+  behind `grantable-roles.txt` — applies to **project/folder/org** allow policies only. A
+  service-account resource policy has no equivalent attribute, so the provisioner's
+  `iam.serviceAccountAdmin` is unconditioned there and IAM will not refuse a bad `principals:`
+  entry. `bootstrap/principal-grantable-roles.txt` and the reviewer are the only mechanical
+  controls. That is the same posture resource-scoped SA bindings have always had; `principals`
+  is the first block that points it at a **human**, which is why the allow-list exists at all
+  and why it starts with one role.
 - **Keyless:** WIF/OIDC everywhere — no long-lived keys or secrets in a consumer repo.
 - **Pin third-party actions to a commit SHA** for production (the examples use `@vN` tags for
   readability). This engine mints cloud credentials — treat a moved tag as a supply-chain event.
