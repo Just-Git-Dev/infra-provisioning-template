@@ -5,6 +5,7 @@ the alternatives were. Newest first.
 
 ## Index
 
+- [2026-09-06 — `v1` had been stranded on v1.3.0 for three releases; moved, and the release step given a verify command](#2026-09-06--v1-had-been-stranded-on-v130-for-three-releases-moved-and-the-release-step-given-a-verify-command)
 - [2026-09-06 — `principals`: a human/group member on one service account, guarded by a file rather than by IAM](#2026-09-06--principals-a-humangroup-member-on-one-service-account-guarded-by-a-file-rather-than-by-iam)
 - [2026-09-05 — RCA: the run trailer was a fixed string, so it contradicted the plan above it](#2026-09-05--rca-the-run-trailer-was-a-fixed-string-so-it-contradicted-the-plan-above-it)
 - [2026-08-24 — `resource_roles` grows pub/sub and Artifact Registry kinds](#2026-08-24--resource_roles-grows-pubsub-and-artifact-registry-kinds)
@@ -16,6 +17,45 @@ the alternatives were. Newest first.
 - [2026-08-21 — caller inputs move to `env:`; CI grows actionlint and lints `action.yml` itself](#2026-08-21--caller-inputs-move-to-env-ci-grows-actionlint-and-lints-actionyml-itself)
 - [2026-08-20 — SHA-pin this repo's own actions and enforce it in CI](#2026-08-20--sha-pin-this-repos-own-actions-and-enforce-it-in-ci)
 - [2026-08-20 — port the two mutation-path engine fixes from the consumer; release v1.0.1](#2026-08-20--port-the-two-mutation-path-engine-fixes-from-the-consumer-release-v101)
+
+---
+
+## 2026-09-06 — `v1` had been stranded on v1.3.0 for three releases; moved, and the release step given a verify command
+
+**What.** The floating `v1` alias moved from `123ef51` (v1.3.0) to `bdf536a` (v1.6.0), and
+`AGENTS.md`'s Releasing section gained a copy-pasteable command block ending in a
+**remote** verification.
+
+**What was wrong.** `AGENTS.md` has always said to move `v1` onto each release and to keep it
+from disagreeing with the newest `v1.x`. Three consecutive releases — v1.4.0, v1.5.x and
+v1.6.0 — did not, so `@v1` served code predating three real fixes: the dry-run trailer that
+contradicted its own plan (#17), the WIF provider `displayName` reconcile (#16), and the
+metadata reconcile that never converged (#15). For a tool that runs as a consumer's
+provisioner SA with IAM-admin rights, the first of those is the worst kind of bug to serve
+from a floating pointer: an operator reading "no changes" while changes were planned.
+
+**Why it went unnoticed for three releases, which is the part worth fixing.** The rule was
+correct and written down; it simply was not executed, and nothing observed the omission. The
+real consumer pins a full commit SHA — so `v1` being stale broke nothing anyone tested, and
+the only signal would have been someone manually comparing two refs. A rule whose violation
+produces no symptom will drift.
+
+**The fix is a verify step, not a stronger sentence.** The new block ends with
+`git ls-remote origin 'refs/tags/v1^{}'` and the same for the version tag, and states that a
+release is not finished until both print the same SHA. It checks the **remote**, because the
+failure mode is forgetting to push, and a local clone looks correct either way. It also notes
+that `tag.annotate` may be enabled globally, which makes a bare `git tag` fail.
+
+**Considered and rejected: retiring `v1` entirely.** Deleting it forces everyone onto an
+explicit `vX.Y.Z` or SHA, which is the posture this repo actually wants. But it hard-breaks
+any unknown `@v1` consumer instead of silently correcting them, and the README examples use
+`@vN` for readability. Measured blast radius made moving it clearly safe: public repo, **0
+forks, 0 stars**, and the one known consumer pins a SHA. Retiring it stays available later if
+the alias keeps drifting.
+
+**A CI guard was considered and not built** — a job asserting `v1` matches the newest `v1.x`
+would catch this mechanically. It is the right end state; it was left out to keep this change
+docs-only, and because a tag-push is not a PR event, so the guard needs its own trigger design.
 
 ---
 

@@ -60,3 +60,23 @@ SHA-pinned` must pass, and admins are not exempt.
 Tag `vX.Y.Z` on the merge commit, then move the floating `v1` alias to it. Keep `v1`
 pointing at a **real** semver tag — never at an untagged commit — so `v1` and the newest
 `v1.x` never disagree. Record the why in `DECISIONS.md`.
+
+**Moving `v1` is the step that gets skipped** — three consecutive releases (v1.4.0, v1.5.x,
+v1.6.0) left it stranded on v1.3.0, so `@v1` served code predating three real fixes until
+2026-09-06. Prose did not prevent that; the check below is what to actually run. Note
+`tag.annotate` may be on globally, so every `git tag` needs `-m`.
+
+```bash
+SHA=$(git rev-parse origin/main)          # the merge commit
+git tag -a vX.Y.Z -m "vX.Y.Z — <one line>" "$SHA" && git push origin vX.Y.Z
+git tag -f -a v1 -m "v1 -> vX.Y.Z ($(git rev-parse --short "$SHA"))" "$SHA"
+git push -f origin v1
+
+# VERIFY AGAINST THE REMOTE, not the local clone — this is the step that catches a skip:
+git ls-remote origin 'refs/tags/v1^{}' | cut -f1        # must equal $SHA
+git ls-remote origin 'refs/tags/vX.Y.Z^{}' | cut -f1    # must equal $SHA
+```
+
+A release is not finished until both of those print the same SHA. `v1` is a convenience for
+readers of the examples — **production consumers pin a full commit SHA**, which is why a
+stale alias can go three releases without anyone noticing.
