@@ -1,0 +1,29 @@
+# Roles a HUMAN or GROUP principal may be granted on a service account, via the top-level
+# `principals:` block in a config. ADR-008 (2026-09-06).
+#
+# ── READ THIS BEFORE ADDING A LINE ─────────────────────────────────────────────────────
+# IAM DOES NOT ENFORCE THIS FILE. `grantable-roles.txt` is backed by a real IAM Condition
+# (`modifiedGrantsByRole`) on the provisioner's `resourcemanager.projectIamAdmin` binding, so
+# a role missing from it is DENIED by GCP at apply time. That attribute applies to
+# project/folder/org allow policies ONLY — a SERVICE ACCOUNT resource policy has no equivalent,
+# and the provisioner's `iam.serviceAccountAdmin` is therefore unconditioned. (Stated in
+# grantable-roles.txt's own "NOT COVERED" note.)
+#
+# So this file is a CI gate plus a review artifact, not a security control. A config naming
+# `roles/owner` here would be caught by tests/test_configs.py, by the reviewer, and by nothing
+# else. Every line is a decision; the list starts at ONE deliberately.
+#
+# The other constraints live in the engine, not here: kind is restricted to `service_accounts`,
+# and a member must carry a `user:` or `group:` prefix (a `serviceAccount:` member belongs in
+# `resource_roles`).
+#
+# Duplicated in the consumer repo's bootstrap/ and asserted byte-identical by its
+# tests/test_configs.py — the engine reads its OWN copy (core.ROOT), because at run time it is
+# a checked-out action whose root is not the config root. Same arrangement as
+# provisioner-roles.txt. Edit BOTH.
+
+# Mint an access token AS the target SA — i.e. `--impersonate-service-account`. Confers,
+# transitively, exactly what that SA can do and nothing more, so the grant is only ever as
+# wide as the SA it is bound on. NOT roles/iam.serviceAccountUser: that is `actAs` (deploy a
+# workload AS the SA), which is a different operation and is owned by the `act_as` subsystem.
+roles/iam.serviceAccountTokenCreator

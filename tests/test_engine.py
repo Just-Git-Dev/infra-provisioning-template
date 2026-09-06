@@ -100,8 +100,21 @@ def test_handlers_are_access_only():
     # `resource_roles` (2026-08-23) binds roles on a single resource; it still grants
     # access and never creates a resource, so the scope line is unmoved. Adding an
     # entry here is a scope decision — it needs a DECISIONS entry, not just a commit.
-    assert set(P.HANDLERS) == {"service_accounts", "act_as", "resource_roles", "wif"}
-    assert set(P.PRUNERS) == {"service_accounts", "act_as", "resource_roles", "provisioner"}
+    # `principals` (2026-09-06, ADR-008) binds a HUMAN/GROUP member on one service account.
+    # Still access-only and still creates nothing, so the scope line is again unmoved — but it
+    # is the first block whose member is a person, so it took a decision record of its own.
+    assert set(P.HANDLERS) == {"service_accounts", "act_as", "resource_roles", "principals",
+                               "wif"}
+    assert set(P.PRUNERS) == {"service_accounts", "act_as", "resource_roles", "principals",
+                              "provisioner"}
+
+
+def test_handler_registry_includes_principals():
+    """Order matters: `principals` binds ON a service account, so the SA handler must have
+    run first. Dict order IS run order in provision.run()."""
+    keys = list(P.HANDLERS)
+    assert "principals" in keys and "principals" in P.PRUNERS
+    assert keys.index("principals") > keys.index("service_accounts")
 
 
 # ── act_as (SA→SA impersonation) ─────────────────────────────────────────────
@@ -818,6 +831,142 @@ def test_mutation_count_does_not_leak_between_runs():
         _drive_run(td, lambda: core.do(lambda: None, "bind roles/x to sa"))
         second = _drive_run(td, lambda: None)
     assert "no changes" in second, "count leaked into the next run:\n%s" % second
+
+
+# ── principals: a HUMAN/GROUP member on one service account (ADR-008) ────────
+# The gap these close: every member the provider built was `serviceAccount:{email}`, so a
+# human could be granted nothing — which is how `log-reader` shipped as three SAs nobody
+# could impersonate (PERMISSION_DENIED on iam.serviceAccounts.getAccessToken, 2026-09-06).
+# Narrow by construction: kind `service_accounts` only, role must be allow-listed, member
+# must carry a `user:`/`group:` prefix. IAM does NOT enforce any of that — the file and the
+# reviewer do (modifiedGrantsByRole covers project/folder/org policies, not SA policies).
+
+_TOKEN_CREATOR = "roles/iam.serviceAccountTokenCreator"
+
+
+def _principals_cfg(member="user:someone@example.com", roles=("iam.serviceAccountTokenCreator",),
+                    kind="service_accounts", resource="log-reader"):
+    return {
+        "service_accounts": [{"name": "log-reader", "roles": ["logging.viewer"]}],
+        "principals": [{"member": member,
+                        "resource_roles": {kind: {resource: list(roles)}}}],
+    }
+
+
+def test_principals_binds_missing_role():
+    out = drive(P.ensure_principals, _principals_cfg(),
+                lambda args: "exists" if "describe" in args else "")
+    assert (f"would   bind {_TOKEN_CREATOR} on service account log-reader "
+            f"→ user:someone@example.com") in out
+
+
+def test_principals_idempotent_when_present():
+    def gmap(args):
+        if "describe" in args:
+            return "exists"
+        return f"{_TOKEN_CREATOR},user:someone@example.com"
+
+    out = drive(P.ensure_principals, _principals_cfg(), gmap)
+    assert f"✓   service account log-reader: {_TOKEN_CREATOR}" in out
+    assert "would" not in out
+
+
+def test_principals_rejects_non_allowlisted_role():
+    """The allow-list is the ONLY mechanical control here, so it must fail at plan time."""
+    cfg = _principals_cfg(roles=("owner",))
+    try:
+        drive(P.ensure_principals, cfg, lambda args: "exists")
+    except SystemExit as e:
+        assert "roles/owner" in str(e) and "principal-grantable-roles.txt" in str(e)
+    else:
+        raise AssertionError("expected a loud exit for a role outside the allow-list")
+
+
+def test_principals_rejects_service_account_member():
+    cfg = _principals_cfg(member="serviceAccount:rotator@p.iam.gserviceaccount.com")
+    try:
+        drive(P.ensure_principals, cfg, lambda args: "exists")
+    except SystemExit as e:
+        assert "resource_roles" in str(e)
+    else:
+        raise AssertionError("expected a loud exit for a serviceAccount: member")
+
+
+def test_principals_rejects_bare_member():
+    """A bare string is passed to gcloud verbatim, which would bind something unintended."""
+    cfg = _principals_cfg(member="someone@example.com")
+    try:
+        drive(P.ensure_principals, cfg, lambda args: "exists")
+    except SystemExit as e:
+        assert "user:" in str(e) and "group:" in str(e)
+    else:
+        raise AssertionError("expected a loud exit for a member with no principal prefix")
+
+
+def test_principals_rejects_unknown_kind():
+    cfg = _principals_cfg(kind="secrets", resource="app-secrets")
+    try:
+        drive(P.ensure_principals, cfg, lambda args: "exists")
+    except SystemExit as e:
+        assert "service_accounts" in str(e)
+    else:
+        raise AssertionError("expected a loud exit for a kind other than service_accounts")
+
+
+def test_principals_absent_target_sa_fails_loud():
+    """Mirrors ensure_resource_roles: we BIND, never create — and a silent skip would make
+    a clean plan a lie about access that does not exist."""
+    try:
+        drive(P.ensure_principals, _principals_cfg(), lambda args: "")
+    except SystemExit as e:
+        assert "log-reader" in str(e)
+    else:
+        raise AssertionError("expected a loud exit for an absent service account")
+
+
+def test_principals_none_declared_skips():
+    out = drive(P.ensure_principals, {"service_accounts": [{"name": "sa1"}]},
+                lambda args: "exists")
+    assert "no principals declared" in out
+
+
+def test_prune_principals_removes_undeclared():
+    """Only a member AND resource the config declares: the human is declared and the SA is
+    declared, but this particular role is not, so it goes."""
+    cfg = _principals_cfg()
+    live = (f"{_TOKEN_CREATOR},user:someone@example.com\n"
+            "roles/iam.serviceAccountUser,user:someone@example.com")
+    out = drive(P.prune_principals, cfg, lambda args: live)
+    assert ("would unbind roles/iam.serviceAccountUser on service account log-reader "
+            "from user:someone@example.com") in out
+    assert _TOKEN_CREATOR not in out.split("would unbind")[-1]   # declared → kept
+
+
+def test_prune_principals_leaves_foreign_human_bindings():
+    """The important negative. Two human subjects so it cannot pass vacuously: the declared
+    member's undeclared role is pruned, a DIFFERENT person's binding on the same SA survives.
+    Service-account members are prune_resource_roles'/prune_act_as' business, not this one's."""
+    cfg = _principals_cfg()
+    live = (f"{_TOKEN_CREATOR},user:someone@example.com\n"
+            "roles/iam.serviceAccountUser,user:someone@example.com\n"
+            f"{_TOKEN_CREATOR},user:stranger@example.com\n"
+            "roles/iam.serviceAccountUser,serviceAccount:rotator@p.iam.gserviceaccount.com")
+    out = drive(P.prune_principals, cfg, lambda args: live)
+    assert ("would unbind roles/iam.serviceAccountUser on service account log-reader "
+            "from user:someone@example.com") in out
+    assert "stranger@example.com" not in out          # another human's grant → untouched
+    assert "rotator@" not in out                      # an SA member → another pruner's job
+
+
+def test_prune_principals_none_declared_skips():
+    out = drive(P.prune_principals, {"service_accounts": [{"name": "sa1"}]},
+                lambda args: "")
+    assert "no principals declared" in out
+
+
+def test_principal_grantable_roles_is_seeded_with_exactly_token_creator():
+    """Widening this file is the whole risk surface — IAM will not stop a bad entry."""
+    assert P.principal_grantable_roles() == {_TOKEN_CREATOR}
 
 
 if __name__ == "__main__":

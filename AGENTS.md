@@ -34,6 +34,11 @@ which pins a **full commit SHA**, not `@v1`.
   single SA) and deliberately does NOT create one — an absent target fails loud. Adding a
   handler that CREATES an app-owned resource crosses the ADR-001 line and needs a decision,
   not just a commit; `tests/test_engine.py::test_handlers_are_access_only` guards the set.
+- **`principals` is the one block whose member is a HUMAN.** Top-level (not under an SA), kind
+  `service_accounts` only, and the role must be in `bootstrap/principal-grantable-roles.txt`.
+  IAM does not gate it — `modifiedGrantsByRole` covers project/folder/org policies, not SA
+  resource policies — so that file *is* the control. Widening it, or adding a kind, is a
+  decision, not a commit.
 - **Adding a provider is a new `providers/<kind>.py`** satisfying the contract core drives
   (`HANDLERS`/`PRUNERS`, `context(target)`, `preflight(ctx)`, `label(key, target, ctx)`).
   Core, the CLI and existing providers stay untouched.
