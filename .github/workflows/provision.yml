@@ -80,7 +80,7 @@ jobs:
       # credentials and rewrites IAM, so a moved tag is a supply-chain event. The
       # trailing comment is the human-readable version. Bump both together.
       - name: Provision
-        uses: Just-Git-Dev/infra-provisioning-template@b35575b4141a0d0e57b0a4518dc9b9c809d0f3e7 # v1.0.1
+        uses: Just-Git-Dev/infra-provisioning-template@bdf536ad0078a5582a063d60b71711d83987c867 # v1.6.0
         with:
           project: ${{ inputs.project }}
           apply:   ${{ inputs.apply }}
