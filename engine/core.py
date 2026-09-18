@@ -24,6 +24,19 @@ import sys
 # (e.g. bootstrap/provisioner-roles.txt) relative to this.
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+
+def config_root():
+    """Root that holds `projects/<key>/config.yaml` — and anything else that belongs to the
+    CONFIGS rather than to the engine. $PROVISION_CONFIG_ROOT, else the current directory.
+
+    Deliberately NOT `ROOT`: this engine is consumed as a SHA-pinned composite action, so
+    `ROOT` is the ENGINE checkout while the configs live in the caller's repo. `provision.py`
+    is the CLI seam that sets $PROVISION_CONFIG_ROOT from `--config-root`; providers call this
+    so they do not have to import the CLI (which imports them).
+    """
+    return os.environ.get("PROVISION_CONFIG_ROOT") or os.getcwd()
+
+
 DRY = True          # set by the CLI (provision.py): DRY = not --apply
 _TTY = sys.stdout.isatty()
 

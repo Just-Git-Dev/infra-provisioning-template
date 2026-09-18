@@ -83,6 +83,44 @@ config (no `targets:` key) auto-wraps to a single `kind: gcp` target, so GCP-onl
 skip the wrapper. Explicit `targets:` mix `gcp` + `kubernetes`, applied **gcp-first** so a
 KSA's Workload-Identity reference to a GCP SA resolves.
 
+### `capability:<name>` — one friendly name for a SET of roles
+
+A capability is an alias for the roles some job actually needs. `capability:observability-read`
+is a reviewable statement of intent; `[logging.viewer, monitoring.viewer]` repeated across
+projects is a list nobody re-reads.
+
+```yaml
+service_accounts:
+  - name: log-reader
+    roles:
+      - capability:observability-read       # expands to every role the capability names
+      - run.viewer                          # plain roles are unchanged
+```
+
+The map lives **with the configs**, at `<config-root>/bootstrap/capabilities.yaml`:
+
+```yaml
+observability-read: [logging.viewer, monitoring.viewer]
+```
+
+Three things about that are deliberate:
+
+- **It is read from the config root, never from this repo.** The engine is consumed as a
+  SHA-pinned composite action, so a map living here would need an engine release plus a SHA
+  bump for every new capability — the whole cost this mechanism exists to avoid. Definition
+  and use then land in the same PR, reviewed together.
+- **Expansion happens before the binding loop**, so a capability of N roles still emits N
+  one-role bindings. That is load-bearing, not cosmetic: the fleet provisioner's grant is
+  fenced by `modifiedGrantsByRole ... hasOnly([...])`, capped at 10 roles and chunked across
+  several conditional bindings, and a call touching two chunks satisfies neither.
+- **An unknown capability fails at PLAN time**, listing the ones that exist. An unknown *role*
+  is not caught here — it fails later, in `gcloud` — but a friendly name that behaved the same
+  way would add a new silent-failure mode to a mechanism whose point is legible grants.
+
+The pruner expands capabilities too. It has to: comparing live roles against the *unexpanded*
+list would make every capability-granted role look undeclared, and the next `--prune` would
+unbind exactly what the config just asked for.
+
 ### `resource_roles` — bind a role on ONE resource, not the whole project
 
 `roles:` grants at **project** scope. When an SA needs a permission on exactly one secret or

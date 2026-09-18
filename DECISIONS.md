@@ -5,6 +5,7 @@ the alternatives were. Newest first.
 
 ## Index
 
+- [2026-09-18 — `capability:<name>`: a friendly name for a set of roles, defined next to the configs](#2026-09-18--capabilityname-a-friendly-name-for-a-set-of-roles-defined-next-to-the-configs)
 - [2026-09-06 — `v1` had been stranded on v1.3.0 for three releases; moved, and the release step given a verify command](#2026-09-06--v1-had-been-stranded-on-v130-for-three-releases-moved-and-the-release-step-given-a-verify-command)
 - [2026-09-06 — `principals`: a human/group member on one service account, guarded by a file rather than by IAM](#2026-09-06--principals-a-humangroup-member-on-one-service-account-guarded-by-a-file-rather-than-by-iam)
 - [2026-09-05 — RCA: the run trailer was a fixed string, so it contradicted the plan above it](#2026-09-05--rca-the-run-trailer-was-a-fixed-string-so-it-contradicted-the-plan-above-it)
@@ -17,6 +18,57 @@ the alternatives were. Newest first.
 - [2026-08-21 — caller inputs move to `env:`; CI grows actionlint and lints `action.yml` itself](#2026-08-21--caller-inputs-move-to-env-ci-grows-actionlint-and-lints-actionyml-itself)
 - [2026-08-20 — SHA-pin this repo's own actions and enforce it in CI](#2026-08-20--sha-pin-this-repos-own-actions-and-enforce-it-in-ci)
 - [2026-08-20 — port the two mutation-path engine fixes from the consumer; release v1.0.1](#2026-08-20--port-the-two-mutation-path-engine-fixes-from-the-consumer-release-v101)
+
+---
+
+## 2026-09-18 — `capability:<name>`: a friendly name for a set of roles, defined next to the configs
+
+**What.** `roles:` entries may now read `capability:observability-read`, expanding to the roles
+that capability names. The map is `<config-root>/bootstrap/capabilities.yaml` — the CONFIG
+repo's, not this one's.
+
+**Why now.** The post-deploy metrics probe (`reusable-workflows/verify-metrics-arrival.yml`,
+shipped the same day) needs a service account that can *both* list metric descriptors and read
+Cloud Run logs. No SA in the fleet could do both. Granting that is two roles that only make
+sense together, about to be repeated across every project that adopts the probe — which is
+exactly when a list of role strings stops being reviewable. `capability:observability-read`
+says what the grant is FOR; `[logging.viewer, monitoring.viewer]`, repeated four times, says
+only what it is.
+
+**Why the map lives at the CONFIG root and not here.** `core.ROOT` is this repo, and since
+ADR-003 Phase 1c this repo is consumed by `infra-provisioning` as a SHA-pinned composite
+action. A map here would mean an engine release plus a SHA bump every time someone adds a
+capability — which is strictly worse than typing the two roles out, and would have killed the
+idea. At the config root, the capability's definition and its first use land in the same PR
+and are reviewed together. `config_root()` moved from `provision.py` into `core.py` for this:
+providers need it, and importing the CLI from a provider is a cycle.
+
+**Expansion happens BEFORE the per-role binding loop**, so a capability of N roles still emits
+N one-role `add-iam-policy-binding` calls. `bootstrap/grantable-roles.txt` states the reason:
+`hasOnly()` accepts at most 10 roles, so the allow-list is chunked into separate conditional
+bindings, and that only works because every `setIamPolicy` call modifies exactly one role. A
+batched capability would satisfy neither chunk and be denied — with an error that looks nothing
+like its cause. `test_one_role_per_set_iam_policy_call` still passes unchanged, and
+`test_capability_roles_are_bound_one_per_call` is its twin on the new path.
+
+**An unknown capability fails at plan time**, listing the known ones. Note what this is *not*
+consistent with: an unknown ROLE is not rejected at plan time at all — it fails later, inside
+gcloud. That asymmetry is intentional. A role string is passed through to an API that will
+reject it; a capability name is resolved *by us*, and a name we do not recognise resolving to
+"no roles" would bind nothing while the config reads as a grant. Shipping that in a change
+whose entire purpose is removing a silent-failure mode would be self-defeating, so it raises
+`SystemExit` during the dry-run plan, in the style of `_declared_principals`.
+
+**The pruner expands too**, which was the one genuinely dangerous corner. `prune_service_accounts`
+asks "which live roles does the config not declare?". Comparing against the unexpanded list
+makes every capability-granted role look extra, so the next `--prune` would unbind precisely
+what the config just granted — and the plan would read as a correct cleanup.
+`test_prune_does_not_unbind_what_a_capability_granted` pins it.
+
+**Rejected:** a bare friendly name in `roles:` (ambiguous with a short role name like
+`logging.viewer`, and `_qualify` would turn a typo into `roles/<typo>` and hand it to gcloud);
+and a `capabilities:` block inside each `config.yaml` (per-project copies of a fleet-wide
+definition is the duplication this removes).
 
 ---
 

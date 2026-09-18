@@ -420,6 +420,168 @@ def test_qualify_leaves_custom_roles_alone():
     assert P._qualify("organizations/1/roles/x") == "organizations/1/roles/x"
 
 
+
+# ── capabilities: a friendly name for a SET of roles ─────────────────────────
+# `capability:observability-read` in a config's `roles:` expands to the roles the
+# capability names. Every property these tests pin is one that, if it broke, would break
+# QUIETLY: a capability that binds nothing, a pruner that unbinds what the capability just
+# granted, a batched setIamPolicy that the hasOnly() condition denies, or a typo'd
+# capability name that reaches a live apply before anyone notices.
+
+
+def _with_capabilities(body, fn):
+    """Run `fn` with a temporary <config-root>/bootstrap/capabilities.yaml holding `body`.
+
+    The map is read from the CONFIG root, not from the engine repo — so this sets
+    $PROVISION_CONFIG_ROOT, which is the same seam `provision.py --config-root` drives.
+    `body=None` writes no file at all (the "no capabilities defined" case)."""
+    import tempfile
+    prev = os.environ.get("PROVISION_CONFIG_ROOT")
+    with tempfile.TemporaryDirectory() as tmp:
+        os.makedirs(os.path.join(tmp, "bootstrap"))
+        if body is not None:
+            with open(os.path.join(tmp, "bootstrap", "capabilities.yaml"), "w") as fh:
+                fh.write(body)
+        os.environ["PROVISION_CONFIG_ROOT"] = tmp
+        try:
+            return fn()
+        finally:
+            if prev is None:
+                os.environ.pop("PROVISION_CONFIG_ROOT", None)
+            else:
+                os.environ["PROVISION_CONFIG_ROOT"] = prev
+
+
+OBS = "observability-read: [logging.viewer, monitoring.viewer]\n"
+
+
+def test_capability_expands_to_every_role_it_names():
+    cfg = {"service_accounts": [{"name": "log-reader",
+                                 "roles": ["capability:observability-read"]}]}
+
+    def gmap(args):
+        if "describe" in args:
+            return "log-reader\t" + P._described("")
+        return ""                                   # neither role bound yet
+
+    out = _with_capabilities(OBS, lambda: drive(P.ensure_service_accounts, cfg, gmap))
+    assert "would   bind roles/logging.viewer → log-reader" in out, out
+    # The SECOND role is the one that matters: expanding to only the first would still
+    # produce a plausible-looking plan.
+    assert "would   bind roles/monitoring.viewer → log-reader" in out, out
+
+
+def test_capability_roles_are_bound_one_per_call():
+    """The hasOnly() constraint is per-CALL, so a capability must not batch its roles.
+
+    The fleet provisioner's projectIamAdmin binding is fenced by
+    `modifiedGrantsByRole ... hasOnly([...])`, capped at 10 roles and therefore chunked
+    across several conditional bindings. A setIamPolicy call touching roles from two chunks
+    satisfies NEITHER and is denied — with an error that looks nothing like its cause. This
+    is test_one_role_per_set_iam_policy_call's twin for the capability path.
+    """
+    cfg = {"service_accounts": [{"name": "log-reader",
+                                 "roles": ["capability:observability-read"]}]}
+    calls = []
+    core.DRY = False
+    P.gout = lambda args, project=None: "exists" if "describe" in args else ""
+    P.gcloud = lambda args, project=None, check=True: calls.append(args) or _Ok()
+    buf = io.StringIO()
+    try:
+        with redirect_stdout(buf):
+            _with_capabilities(OBS, lambda: P.ensure_service_accounts(cfg, "p"))
+    finally:
+        core.DRY = True
+    binds = [a for a in calls if "add-iam-policy-binding" in a]
+    assert len(binds) == 2, "expected one call per expanded role, got %d" % len(binds)
+    for a in binds:
+        roles = [x for x in a if x.startswith("--role=")]
+        assert len(roles) == 1, "a single call bound %d roles: %s" % (len(roles), roles)
+
+
+def test_unknown_capability_fails_at_plan_time():
+    """An unknown ROLE is not caught here — it fails later, in gcloud. A friendly name that
+    behaved the same way would add a new silent-failure mode to a mechanism whose whole
+    purpose is legible grants, so this one is rejected while the plan is still a plan."""
+    cfg = {"service_accounts": [{"name": "log-reader", "roles": ["capability:observabilty-read"]}]}
+    try:
+        _with_capabilities(OBS, lambda: drive(P.ensure_service_accounts, cfg, lambda args: ""))
+    except SystemExit as e:
+        assert "unknown capability" in str(e), e
+        assert "observability-read" in str(e), "the error must list what IS known: %s" % e
+    else:
+        raise AssertionError("a typo'd capability name planned cleanly")
+
+
+def test_capability_referenced_with_no_map_at_all_fails():
+    """Absent file + a config that asks for a capability is still a hard failure. Returning
+    {} quietly would bind NOTHING while the config reads as a grant."""
+    cfg = {"service_accounts": [{"name": "log-reader", "roles": ["capability:observability-read"]}]}
+    try:
+        _with_capabilities(None, lambda: drive(P.ensure_service_accounts, cfg, lambda args: ""))
+    except SystemExit as e:
+        assert "unknown capability" in str(e), e
+    else:
+        raise AssertionError("a capability with no capabilities.yaml planned cleanly")
+
+
+def test_plain_roles_are_untouched_by_the_capability_path():
+    """The other subject on this axis: adding capability support must not change a config
+    that uses none. Without this, 'capabilities expand' would hold for an implementation
+    that mangled every ordinary role."""
+    cfg = {"service_accounts": [{"name": "sa1", "roles": ["run.admin",
+                                                          "projects/p/roles/jgdCustom"]}]}
+    out = _with_capabilities(OBS, lambda: drive(P.ensure_service_accounts, cfg,
+                                                lambda args: ""))
+    assert "would   bind roles/run.admin → sa1" in out, out
+    assert "would   bind projects/p/roles/jgdCustom → sa1" in out, out
+
+
+def test_a_role_named_both_directly_and_by_capability_binds_once():
+    cfg = {"service_accounts": [{"name": "log-reader",
+                                 "roles": ["logging.viewer", "capability:observability-read"]}]}
+    out = _with_capabilities(OBS, lambda: drive(P.ensure_service_accounts, cfg,
+                                                lambda args: ""))
+    assert out.count("bind roles/logging.viewer") == 1, out
+    assert "bind roles/monitoring.viewer" in out, out
+
+
+def test_prune_does_not_unbind_what_a_capability_granted():
+    """The trap: the pruner asks 'which live roles does config not declare?'. Comparing
+    against UNEXPANDED roles makes every capability-granted role look extra, so the next
+    --prune would remove exactly what the config just asked for."""
+    cfg = {"service_accounts": [{"name": "log-reader",
+                                 "roles": ["capability:observability-read"]}]}
+    live = "roles/logging.viewer\nroles/monitoring.viewer\nroles/editor"
+    out = _with_capabilities(OBS, lambda: drive(P.prune_service_accounts, cfg,
+                                                lambda args: live))
+    assert "would unbind roles/editor" in out, out
+    assert "logging.viewer" not in out, "pruned a role the capability grants:\n" + out
+    assert "monitoring.viewer" not in out, "pruned a role the capability grants:\n" + out
+
+
+def test_an_empty_capability_is_rejected():
+    """An empty list binds nothing while reading as a grant — the silent-failure shape this
+    whole mechanism exists to remove."""
+    try:
+        _with_capabilities("observability-read: []\n", P.capabilities)
+    except SystemExit as e:
+        assert "non-empty" in str(e), e
+    else:
+        raise AssertionError("an empty capability was accepted")
+
+
+def test_capabilities_are_read_from_the_config_root_not_the_engine():
+    """core.ROOT is the ENGINE checkout, and the engine is consumed as a SHA-pinned composite
+    action. A map read from there would need an engine release plus a SHA bump for every new
+    capability — which is the entire cost this mechanism exists to avoid."""
+    caps = _with_capabilities(OBS, P.capabilities)
+    assert caps == {"observability-read": ["roles/logging.viewer", "roles/monitoring.viewer"]}, caps
+    # And the engine repo does NOT carry one, so nothing is silently falling back to it.
+    assert not os.path.exists(os.path.join(core.ROOT, "bootstrap", "capabilities.yaml")), (
+        "the engine repo now carries bootstrap/capabilities.yaml — the map belongs with the "
+        "configs, or adding a capability needs an engine release again")
+
 def test_provisioner_kept_roles_substitutes_the_project():
     """`{project}` marks a project-scoped custom role — the provisioner needs one to set IAM
     on a secret, since projectIamAdmin confers setIamPolicy on the PROJECT, not on a resource."""
