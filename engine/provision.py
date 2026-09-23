@@ -63,8 +63,11 @@ def config_root():
     """Root that holds `projects/<key>/config.yaml`. Decouples the engine (this repo) from
     the CONFIGS (the caller's repo): $PROVISION_CONFIG_ROOT, else the current directory. As
     a composite action the caller's workspace supplies the configs while the engine code
-    lives at $GITHUB_ACTION_PATH; run in-repo and the default (cwd) just works."""
-    return os.environ.get("PROVISION_CONFIG_ROOT") or os.getcwd()
+    lives at $GITHUB_ACTION_PATH; run in-repo and the default (cwd) just works.
+
+    The implementation lives in `core` so providers can reach it without importing this
+    module (which imports them). Kept here as the CLI's name for the same thing."""
+    return core.config_root()
 
 
 def run(project_key, apply=False, only=None, prune=False):

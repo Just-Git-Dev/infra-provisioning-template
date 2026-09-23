@@ -144,7 +144,9 @@ def provisioner_kept_roles(project=None):
 # ── subsystem handlers ───────────────────────────────────────────────────────
 def ensure_service_accounts(cfg, project):
     print("service_accounts:")
-    for sa in cfg.get("service_accounts", []):
+    # Capabilities are expanded for EVERY SA before the first mutation is emitted, so an
+    # unknown capability name fails the plan rather than surfacing after some SAs are bound.
+    for sa, roles in _sa_roles(cfg):
         name, email = sa["name"], sa_email(sa["name"], project)
         purpose = sa.get("description", "")
         want_dn = _clip(purpose or name, _DISPLAY_NAME_MAX)
@@ -173,8 +175,9 @@ def ensure_service_accounts(cfg, project):
             do(["iam", "service-accounts", "create", name,
                 f"--display-name={want_dn}", f"--description={want_desc}"],
                project, f"create sa {email}")
-        for role in sa.get("roles", []):
-            role = _qualify(role)
+        # One role per call — never a batch. A capability expanding to N roles emits N
+        # calls for the hasOnly() reason spelled out above _expand_roles.
+        for role in roles:
             if sa_has_role(project, email, role):
                 c("ok", f"  role {role}")
             else:
@@ -335,6 +338,94 @@ def _qualify(role):
     a custom role would silently produce `roles/projects/...`, which gcloud rejects only at
     apply time."""
     return role if role.startswith("roles/") or "/roles/" in role else f"roles/{role}"
+
+
+# ── capabilities: one friendly name for a SET of roles ───────────────────────
+#
+# `capability:observability-read` in a config's `roles:` expands to the roles that
+# capability names. Three properties are load-bearing:
+#
+#   1. THE MAP LIVES WITH THE CONFIGS, not with this engine. `core.ROOT` is the engine
+#      checkout, and the engine is consumed as a SHA-pinned composite action — a map here
+#      would need an engine release plus a SHA bump every time someone adds a capability,
+#      which defeats the entire point of having friendly names. The config that USES a
+#      capability and the map that DEFINES it are then reviewed in the same PR.
+#   2. EXPANSION HAPPENS BEFORE THE BINDING LOOP, so a capability of N roles still emits N
+#      one-role `add-iam-policy-binding` calls. That is not a style preference: the fleet
+#      provisioner's grant is fenced by `modifiedGrantsByRole ... hasOnly([...])`, capped at
+#      10 roles and therefore chunked across several conditional bindings, and a call
+#      touching roles from two chunks satisfies NEITHER and is denied. See
+#      bootstrap/grantable-roles.txt and test_one_role_per_set_iam_policy_call.
+#   3. AN UNKNOWN CAPABILITY FAILS AT PLAN TIME. An unknown *role* is not rejected here at
+#      all — it fails later, in gcloud (see _qualify). Shipping a friendly name that failed
+#      only at apply would add a NEW silent-failure mode, in a mechanism whose whole purpose
+#      is to make grants legible. So this validates during the dry-run plan, the way
+#      _declared_principals does.
+_CAPABILITY_PREFIX = "capability:"
+
+
+def capabilities():
+    """capability name -> [qualified roles], from <config-root>/bootstrap/capabilities.yaml.
+
+    An absent file is fine (no capabilities defined) — but only until a config asks for one,
+    which then fails loud in _expand_roles rather than silently binding nothing."""
+    path = os.path.join(core.config_root(), "bootstrap", "capabilities.yaml")
+    if not os.path.exists(path):
+        return {}
+    try:
+        import yaml
+    except ImportError:  # pragma: no cover - provision.py already hard-fails on this
+        sys.exit("PyYAML required: pip install pyyaml")
+    with open(path) as fh:
+        doc = yaml.safe_load(fh) or {}
+    caps = doc.get("capabilities") if isinstance(doc, dict) and "capabilities" in doc else doc
+    if not isinstance(caps, dict):
+        raise SystemExit(
+            f"{path}: expected a mapping of capability name -> list of roles, got "
+            f"{type(caps).__name__}.")
+    out = {}
+    for name, roles in caps.items():
+        if not isinstance(roles, list) or not roles:
+            raise SystemExit(
+                f"{path}: capability {name!r} must be a non-empty list of roles. An empty "
+                f"capability binds nothing while reading as a grant.")
+        out[name] = [_qualify(r) for r in roles]
+    return out
+
+
+def _expand_roles(roles, where, caps=None):
+    """Expand `capability:<name>` entries; qualify everything else. Returns a FLAT list.
+
+    Order is preserved and duplicates are collapsed, so naming a role both directly and via a
+    capability binds it once rather than emitting a redundant call."""
+    caps = capabilities() if caps is None else caps
+    out = []
+    for raw in roles or []:
+        item = str(raw).strip()
+        if item.startswith(_CAPABILITY_PREFIX):
+            name = item[len(_CAPABILITY_PREFIX):]
+            if name not in caps:
+                raise SystemExit(
+                    f"{where}: unknown capability {name!r}. Define it in "
+                    f"<config-root>/bootstrap/capabilities.yaml, or name the roles directly. "
+                    f"Known capabilities: {sorted(caps) or 'none'}.")
+            expanded = caps[name]
+        else:
+            expanded = [_qualify(item)]
+        for role in expanded:
+            if role not in out:
+                out.append(role)
+    return out
+
+
+def _sa_roles(cfg, caps=None):
+    """[(sa, [qualified roles]), ...] with capabilities expanded, validated up front.
+
+    Computed for EVERY SA before the first binding is emitted: an unknown capability on the
+    fifth SA must not surface after four have already been bound under --apply."""
+    caps = capabilities() if caps is None else caps
+    return [(sa, _expand_roles(sa.get("roles"), f"service_accounts: {sa['name']}", caps))
+            for sa in cfg.get("service_accounts", [])]
 
 
 def _declared_resource_roles(cfg, project):
@@ -606,7 +697,9 @@ def prune_service_accounts(cfg, project):
     print("prune service_accounts:")
     for sa in cfg.get("service_accounts", []):
         name, email = sa["name"], sa_email(sa["name"], project)
-        want = {_qualify(r) for r in sa.get("roles", [])}
+        # Expanded, or every role a capability grants reads as "extra" and the pruner
+        # unbinds exactly what the config just asked for.
+        want = set(_expand_roles(sa.get("roles"), f"service_accounts: {sa['name']}"))
         live = sa_project_roles(project, email)
         extra = [r for r in live if r not in want]
         if not extra:
