@@ -5,6 +5,7 @@ the alternatives were. Newest first.
 
 ## Index
 
+- [2026-09-23 — `v1.7.0` cut on `a016dda`: capability expansion, a minor](#2026-09-23--v170-cut-on-a016dda-capability-expansion-a-minor)
 - [2026-09-18 — `capability:<name>`: a friendly name for a set of roles, defined next to the configs](#2026-09-18--capabilityname-a-friendly-name-for-a-set-of-roles-defined-next-to-the-configs)
 - [2026-09-06 — `v1` had been stranded on v1.3.0 for three releases; moved, and the release step given a verify command](#2026-09-06--v1-had-been-stranded-on-v130-for-three-releases-moved-and-the-release-step-given-a-verify-command)
 - [2026-09-06 — `principals`: a human/group member on one service account, guarded by a file rather than by IAM](#2026-09-06--principals-a-humangroup-member-on-one-service-account-guarded-by-a-file-rather-than-by-iam)
@@ -20,6 +21,21 @@ the alternatives were. Newest first.
 - [2026-08-20 — port the two mutation-path engine fixes from the consumer; release v1.0.1](#2026-08-20--port-the-two-mutation-path-engine-fixes-from-the-consumer-release-v101)
 
 ---
+
+## 2026-09-23 — `v1.7.0` cut on `a016dda`: capability expansion, a minor
+
+**What.** Tag `v1.7.0` on `a016dda`, the squash-merge of #21 (`capability:<name>`, entry below).
+The consumer already pins that SHA — it was bumped before the tag existed, which is safe
+because the pin is the commit, not the name.
+
+**Why a minor.** A config that uses no `capability:` entry expands to exactly the roles it
+listed before, so every existing consumer config behaves unchanged; the new syntax only adds.
+
+**`v1` NOT yet moved — the release is not finished.** Moving the alias is a force-push of a tag;
+the agent's auto-mode classifier denied it, so it waits on the owner (run the `AGENTS.md`
+§Releasing `v1` lines and both `ls-remote` checks). Until then `@v1` serves v1.6.0 — the exact
+stranding the 2026-09-06 entry describes. Nothing breaks (the real consumer pins a SHA), which
+is precisely why it has to be done on purpose.
 
 ## 2026-09-18 — `capability:<name>`: a friendly name for a set of roles, defined next to the configs
 
