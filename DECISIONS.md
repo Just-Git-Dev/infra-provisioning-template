@@ -5,6 +5,7 @@ the alternatives were. Newest first.
 
 ## Index
 
+- [2026-10-19 — CI pins actionlint and shellcheck](#2026-10-19--ci-pins-actionlint-and-shellcheck)
 - [2026-09-23 — `v1.7.0` cut on `a016dda`: capability expansion, a minor](#2026-09-23--v170-cut-on-a016dda-capability-expansion-a-minor)
 - [2026-09-18 — `capability:<name>`: a friendly name for a set of roles, defined next to the configs](#2026-09-18--capabilityname-a-friendly-name-for-a-set-of-roles-defined-next-to-the-configs)
 - [2026-09-06 — `v1` had been stranded on v1.3.0 for three releases; moved, and the release step given a verify command](#2026-09-06--v1-had-been-stranded-on-v130-for-three-releases-moved-and-the-release-step-given-a-verify-command)
@@ -21,6 +22,26 @@ the alternatives were. Newest first.
 - [2026-08-20 — port the two mutation-path engine fixes from the consumer; release v1.0.1](#2026-08-20--port-the-two-mutation-path-engine-fixes-from-the-consumer-release-v101)
 
 ---
+
+## 2026-10-19 — CI pins actionlint and shellcheck
+
+**Context.** `raven-actions/actionlint` is SHA-pinned, but its `version` input defaults to
+`latest`, so each run fetched the newest actionlint. It runs whatever `shellcheck` is on PATH,
+which is the runner image's copy and moves with each image update. The `shellcheck` job's
+bootstrap and composite-action steps used that image copy too. So lint rules could change with no
+commit here. Owner decision, 2026-10-19: pin both everywhere in the fleet, starting with the
+devops repos; `reusable-workflows` went first (its PR #134, DECISIONS 2026-10-19).
+
+**Decision.** The same change as `reusable-workflows`. `version: 1.7.12` on the actionlint step.
+The job's first step downloads the shellcheck v0.11.0 release, checks its SHA-256, asserts
+`--version`, and puts it first on PATH, so the bootstrap and composite-action steps use it as
+well. actionlint also gets that path explicitly (`flags: -shellcheck=…`), because a wrong path
+does not fail: actionlint prints `Rule "shellcheck" was disabled` and exits 0. A canary step after
+the action runs the same actionlint binary and shellcheck path on a one-step workflow with a known
+SC2086, and fails unless SC2086 is reported. A rule change now arrives only by bumping these
+values.
+
+**Not changed.** CI only; the engine and the composite action are untouched, so no release.
 
 ## 2026-09-23 — `v1.7.0` cut on `a016dda`: capability expansion, a minor
 
