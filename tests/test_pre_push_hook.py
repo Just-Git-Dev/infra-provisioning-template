@@ -43,9 +43,54 @@ def repo():
     return d
 
 
+def fake_make(gate):
+    """A dir holding a `make` whose body is `gate`; first on PATH it stands in for `make ci`.
+
+    The hook has no env seam that replaces the gate (a stray `PRE_PUSH_GATE=true` would have
+    silently disabled it), so the tests substitute the command the hook runs instead."""
+    d = tempfile.mkdtemp()
+    path = os.path.join(d, "make")
+    with open(path, "w") as fh:
+        fh.write(f"#!/usr/bin/env bash\n{gate}\n")
+    os.chmod(path, 0o755)
+    return d
+
+
 def hook(d, stdin, gate="true", **env):
+    env.setdefault("PATH", fake_make(gate) + os.pathsep + os.environ["PATH"])
     return subprocess.run([HOOK], cwd=d, input=stdin, capture_output=True, text=True,
-                          env=_clean_env(PRE_PUSH_GATE=gate, **env))
+                          env=_clean_env(**env))
+
+
+def test_pre_push_gate_env_var_does_not_replace_the_gate():
+    d = repo()
+    head = git(d, "rev-parse", "HEAD")
+    r = hook(d, f"refs/heads/main {head} refs/heads/main {ZERO}\n", gate="false", PRE_PUSH_GATE="true")
+    assert r.returncode == 1 and "gate FAILED" in r.stderr
+
+
+def _push_tag(gate, at):
+    """Real `git push` of an annotated tag to a local bare remote, hook installed."""
+    d = repo()
+    bare = tempfile.mkdtemp()
+    git(bare, "init", "-q", "--bare")
+    git(d, "remote", "add", "origin", bare)
+    git(d, "config", "core.hooksPath", os.path.dirname(HOOK))
+    git(d, "tag", "-a", "-m", "release", "v1.0.0", at)
+    path = fake_make(gate) + os.pathsep + os.environ["PATH"]
+    return subprocess.run(["git", "-C", d, "push", "origin", "refs/tags/v1.0.0"],
+                          capture_output=True, text=True,
+                          env=_clean_env(GIT_CONFIG_GLOBAL="/dev/null", PATH=path))
+
+
+def test_annotated_tag_at_head_passes_and_runs_the_gate():
+    r = _push_tag("echo GATE-RAN >&2", "HEAD")
+    assert r.returncode == 0 and "GATE-RAN" in r.stderr, r.stderr
+
+
+def test_annotated_tag_at_another_commit_is_refused():
+    r = _push_tag("true", "HEAD~1")
+    assert r.returncode != 0 and "HEAD is" in r.stderr, r.stderr
 
 
 def test_passes_when_clean_head_and_gate_green():
@@ -98,5 +143,8 @@ if __name__ == "__main__":
     test_refuses_a_dirty_tree()
     test_branch_deletion_needs_no_gate()
     test_git_env_is_scrubbed_before_the_gate_runs()
+    test_pre_push_gate_env_var_does_not_replace_the_gate()
+    test_annotated_tag_at_head_passes_and_runs_the_gate()
+    test_annotated_tag_at_another_commit_is_refused()
     print("pre-push hook: OK")
     sys.exit(0)

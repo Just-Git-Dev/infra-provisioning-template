@@ -49,6 +49,54 @@ def checks(text):
     return m.group(1).replace("\\\n", " ").split()
 
 
+# Targets that call shellcheck/actionlint from PATH: in CI the pinned installers must already have run.
+NEEDS_PINNED_TOOLS = {"tools", "actionlint", "canary", "shellcheck", "composite"}
+
+
+def installer_after_tool_step(jobs):
+    """(job, installer, target) for a pinned-tool install step that follows a make step needing it.
+
+    The first CI run of this gate went red exactly so: `make shellcheck` ran before the pinned
+    actionlint install, and `make tools` could not find the tool (exit 127)."""
+    bad = []
+    for job_name, job in jobs.items():
+        seen = None
+        for step in job["steps"]:
+            if "run" not in step:
+                continue
+            m = re.fullmatch(r"make ([\w-]+)", step["run"].strip())
+            if m and m.group(1) in NEEDS_PINNED_TOOLS and seen is None:
+                seen = m.group(1)
+            elif seen and step.get("name", "").startswith(PLUMBING_PREFIX):
+                bad.append((job_name, step["name"], seen))
+    return bad
+
+
+def test_pinned_check_fails_on_a_path_that_does_not_exist():
+    """A mistyped root used to be skipped silently while the other roots still passed."""
+    import subprocess
+    import tempfile
+    script = os.path.join(ROOT, "scripts", "check_pinned_actions.py")
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "a.yml"), "w", encoding="utf-8") as fh:
+            fh.write("jobs:\n  a:\n    steps:\n      - uses: actions/checkout@" + "a" * 40 + "\n")
+        ok = subprocess.run([sys.executable, script, d], capture_output=True, text=True)
+        assert ok.returncode == 0, ok.stdout
+        r = subprocess.run([sys.executable, script, d, os.path.join(d, "no-such.yml")],
+                           capture_output=True, text=True)
+        assert r.returncode == 1 and "no-such.yml" in r.stdout, r.stdout
+
+
+def test_pinned_installers_run_before_the_make_steps_that_need_them():
+    with open(CI_YML, encoding="utf-8") as fh:
+        jobs = yaml.safe_load(fh)["jobs"]
+    bad = installer_after_tool_step(jobs)
+    assert not bad, f"pinned-tool installer after a make step that needs it: {bad}"
+    late = {"j": {"steps": [{"run": "make shellcheck"},
+                            {"name": "install pinned actionlint", "run": "true"}]}}
+    assert installer_after_tool_step(late) == [("j", "install pinned actionlint", "shellcheck")]
+
+
 def targets_called():
     called, plumbing = [], 0
     for step in run_steps():
@@ -131,5 +179,7 @@ if __name__ == "__main__":
     test_make_ci_runs_nothing_ci_does_not()
     test_pinned_tool_versions_match_the_makefile()
     test_checker_catches_a_retyped_step()
+    test_pinned_check_fails_on_a_path_that_does_not_exist()
+    test_pinned_installers_run_before_the_make_steps_that_need_them()
     print("ci make targets: OK")
     sys.exit(0)

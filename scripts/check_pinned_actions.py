@@ -20,6 +20,10 @@ SHA = re.compile(r'[0-9a-f]{40}\s*($|#)')
 
 def main(argv):
     roots = [pathlib.Path(a) for a in (argv[1:] or [".github/workflows"])]
+    missing = [str(r) for r in roots if not r.exists()]
+    if missing:
+        print(f"::error::path(s) given to check_pinned_actions do not exist: {' '.join(missing)}")
+        return 1
     files = []
     for root in roots:
         files += [root] if root.is_file() else sorted(list(root.rglob("*.yml")) + list(root.rglob("*.yaml")))
