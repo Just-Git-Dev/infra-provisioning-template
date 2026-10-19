@@ -5,6 +5,7 @@ the alternatives were. Newest first.
 
 ## Index
 
+- [2026-10-19 — Local gate == CI: make ci, ci.yml calls the same targets, pre-push hook](#2026-10-19--local-gate--ci-make-ci-ciyml-calls-the-same-targets-pre-push-hook)
 - [2026-10-19 — CI pins actionlint and shellcheck](#2026-10-19--ci-pins-actionlint-and-shellcheck)
 - [2026-09-23 — `v1.7.0` cut on `a016dda`: capability expansion, a minor](#2026-09-23--v170-cut-on-a016dda-capability-expansion-a-minor)
 - [2026-09-18 — `capability:<name>`: a friendly name for a set of roles, defined next to the configs](#2026-09-18--capabilityname-a-friendly-name-for-a-set-of-roles-defined-next-to-the-configs)
@@ -22,6 +23,14 @@ the alternatives were. Newest first.
 - [2026-08-20 — port the two mutation-path engine fixes from the consumer; release v1.0.1](#2026-08-20--port-the-two-mutation-path-engine-fixes-from-the-consumer-release-v101)
 
 ---
+
+## 2026-10-19 — Local gate == CI: make ci, ci.yml calls the same targets, pre-push hook
+
+**Decision.** `make ci` runs exactly the checks `.github/workflows/ci.yml` runs, in CI's order, and `ci.yml` calls the same make targets (`venv`, `tests`, `tools`, `actionlint`, `canary`, `shellcheck`, `composite`, `pinned`). A committed `.githooks/pre-push` (installed by `make hooks`) runs `make ci` on the commit being pushed.
+
+**Why.** Local checks were retyped by hand and drifted from `ci.yml`, so PRs went red for checks the local run had skipped. One definition per check (a make target) removes the drift; `tests/test_ci_make_targets.py` fails if a `run:` step is not `make <target>`, or if the Makefile's `CHECKS` and `ci.yml` disagree. Mirrors the same gate in the sibling topology repo.
+
+**Details.** Python deps live in `requirements-ci.txt` (pyyaml, pytest), installed into a gitignored `.venv` locally and by `make venv` in CI. `make tools` fails when the local shellcheck or actionlint differs from CI's pin. The inline `grep -rnP` pin check became `scripts/check_pinned_actions.py`: BSD grep has no `-P`, so run locally it errored and the step still passed. `raven-actions/actionlint` (which installed and ran actionlint) was replaced by a checksummed pinned release install plus `make actionlint`, so CI and laptop run the same command; the version stays 1.7.12. The hook refuses a dirty tree or a pushed ref whose sha is not HEAD, scrubs git's env, and skips pure deletions. No change to `action.yml` or to what any check checks. Consumers pin this action by commit SHA, so merging this changes nothing for them.
 
 ## 2026-10-19 — CI pins actionlint and shellcheck
 

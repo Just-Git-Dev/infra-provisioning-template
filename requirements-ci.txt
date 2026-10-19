@@ -1,0 +1,5 @@
+# Python deps for the CI gate: `make ci` builds .venv from this file, and ci.yml installs
+# the same file (via `make venv`), so local and CI run the same versions. Pins verified on
+# Python 3.12 (CI) and 3.13 (laptop). Bump here only; one file, two consumers.
+pyyaml==6.0.3
+pytest==9.1.1
