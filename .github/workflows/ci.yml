@@ -34,6 +34,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Lint rules change only with a commit: actionlint is pinned by `version:` below, and
+      # shellcheck here. The runner image's shellcheck moves with every image update, so a
+      # checksummed release goes first on PATH — for every shellcheck step in this job.
+      # Same pin as `reusable-workflows` (DECISIONS 2026-10-19).
+      - name: install pinned shellcheck
+        env:
+          SC_VERSION: v0.11.0
+          SC_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/sc.tar.xz" \
+            "https://github.com/koalaman/shellcheck/releases/download/${SC_VERSION}/shellcheck-${SC_VERSION}.linux.x86_64.tar.xz"
+          echo "${SC_SHA256}  $RUNNER_TEMP/sc.tar.xz" | sha256sum -c -
+          tar -xJf "$RUNNER_TEMP/sc.tar.xz" -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/shellcheck-${SC_VERSION}/shellcheck" --version | grep -qx "version: ${SC_VERSION#v}"
+          echo "$RUNNER_TEMP/shellcheck-${SC_VERSION}" >> "$GITHUB_PATH"
+
       - name: shellcheck bootstrap scripts
         run: shellcheck bootstrap/*.sh
 
@@ -43,7 +60,24 @@ jobs:
       # has the same blast radius as one in a bootstrap script.
       - uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2.2.0
         with:
+          version: 1.7.12
+          # explicit path: actionlint must not fall back to the runner image's shellcheck
+          flags: -shellcheck=${{ runner.temp }}/shellcheck-v0.11.0/shellcheck
           fail-on-error: true
+
+      # Positive control. A wrong -shellcheck path makes actionlint print 'Rule "shellcheck" was
+      # disabled' and exit 0, so the step above can be green with no shellcheck at all. The same
+      # actionlint binary and path must find a known SC2086 in a canary workflow.
+      - name: shellcheck is live inside actionlint (canary)
+        run: |
+          mkdir -p "$RUNNER_TEMP/canary/.github/workflows"
+          # shellcheck disable=SC2016  # the canary's $(ls) and $f are literal text, on purpose
+          printf 'on: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: |\n          f=$(ls)\n          rm $f\n' \
+            > "$RUNNER_TEMP/canary/.github/workflows/canary.yml"
+          cd "$RUNNER_TEMP/canary"
+          out=$("$RUNNER_TEMP/actionlint-1.7.12/actionlint" -shellcheck="$RUNNER_TEMP/shellcheck-v0.11.0/shellcheck" .github/workflows/canary.yml 2>&1 || true)
+          grep -q SC2086 <<<"$out" || { echo "::error::canary SC2086 not reported; shellcheck is not running inside actionlint"; echo "$out"; exit 1; }
+          echo "canary: SC2086 reported (examined 1 canary workflow)"
 
       # actionlint lints workflows; it does not read action.yml. The composite action
       # this repo ships had nothing shellchecking its run: bodies at all.
