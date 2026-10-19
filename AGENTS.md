@@ -46,11 +46,10 @@ which pins a **full commit SHA**, not `@v1`.
 ## Before you push
 
 ```bash
-python3 tests/test_engine.py && python3 tests/test_kubernetes.py   # seams stubbed, no cloud
-shellcheck bootstrap/*.sh
-python3 scripts/extract_action_shell.py > /tmp/a.sh && shellcheck --shell=bash /tmp/a.sh
-actionlint
+make ci    # exactly what ci.yml runs (seams stubbed, no cloud); `make hooks` installs the pre-push hook
 ```
+
+See README "Local gate".
 
 `main` is protected: PR required, `test` / `shellcheck` / `third-party actions are
 SHA-pinned` must pass, and admins are not exempt.

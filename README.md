@@ -198,6 +198,26 @@ python3 engine/provision.py <key> --prune         # plan removals (subtractive)
 python3 tests/test_engine.py && python3 tests/test_kubernetes.py   # seams stubbed; no cloud
 ```
 
+## Local gate
+
+`make ci` runs exactly the checks `.github/workflows/ci.yml` runs, in CI's order; `ci.yml` calls
+the same make targets, so the two cannot drift (`tests/test_ci_make_targets.py` fails if they do).
+
+- `make hooks` once per clone: installs the committed pre-push hook (`core.hooksPath=.githooks`).
+- `make ci` before pushing (the hook runs it for you). It stops at the first failing check, names
+  the target, and prints how many checks ran.
+- What it runs: `venv` (`.venv` built from `requirements-ci.txt`, the same file CI installs),
+  `tests` (engine, kubernetes, bootstrap anchors, and the gate's own tests), `tools` (local
+  shellcheck/actionlint must equal CI's pinned versions, else it prints the install hint),
+  `actionlint`, `canary`, `shellcheck`, `composite` (the composite action's `run:` bodies), `pinned`.
+- The hook checks the commit being pushed, not just the tree: it refuses a dirty tree, or a pushed
+  ref whose sha is not `HEAD`, and says what to do. It scrubs git's env before running checks.
+- Over ssh GitHub can drop the idle connection while the hook runs (rc 141/128); then push over
+  HTTPS with the global git config skipped:
+  `GIT_CONFIG_GLOBAL=/dev/null git push https://github.com/Just-Git-Dev/infra-provisioning-template.git <branch>`.
+- Emergency bypass only: `git push --no-verify`. CI still runs the same checks.
+- Why: DECISIONS.md, "Local gate == CI".
+
 ## Bootstrap (`bootstrap/`)
 
 `anchor.sh` (per-project) or `fleet-anchor.sh` (one SA reaches all projects) establish the

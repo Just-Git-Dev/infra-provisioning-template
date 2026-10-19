@@ -23,20 +23,20 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with: { python-version: '3.12' }
-      - run: python3 -m pip install --quiet pyyaml
-      - name: Engine tests
-        run: |
-          python3 tests/test_engine.py
-          python3 tests/test_kubernetes.py
-          python3 tests/test_anchor.py    # bootstrap anchors, gcloud stubbed on PATH
+      # Every check is a make target (Makefile), the same ones `make ci` runs locally:
+      # one definition, so local and CI cannot drift (tests/test_ci_make_targets.py).
+      - name: Python venv from requirements-ci.txt
+        run: make venv
+      - name: Engine tests, bootstrap anchors (gcloud stubbed on PATH), gate tests
+        run: make tests
 
   shellcheck:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # Lint rules change only with a commit: actionlint is pinned by `version:` below, and
-      # shellcheck here. The runner image's shellcheck moves with every image update, so a
+      # Lint rules change only with a commit: actionlint and shellcheck are pinned below (and in the
+      # Makefile, which `make tools` checks locally; a test asserts the two agree). shellcheck: The runner image's shellcheck moves with every image update, so a
       # checksummed release goes first on PATH — for every shellcheck step in this job.
       # Same pin as `reusable-workflows` (DECISIONS 2026-10-19).
       - name: install pinned shellcheck
@@ -52,40 +52,43 @@ jobs:
           echo "$RUNNER_TEMP/shellcheck-${SC_VERSION}" >> "$GITHUB_PATH"
 
       - name: shellcheck bootstrap scripts
-        run: shellcheck bootstrap/*.sh
+        run: make shellcheck
 
       # `shellcheck bootstrap/*.sh` only ever looked at the anchors. actionlint bundles
       # shellcheck over every `run:` body too — including this file's and, via the step
       # below, the composite action's. A quoting bug in the step that invokes the engine
       # has the same blast radius as one in a bootstrap script.
-      - uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2.2.0
-        with:
-          version: 1.7.12
-          # explicit path: actionlint must not fall back to the runner image's shellcheck
-          flags: -shellcheck=${{ runner.temp }}/shellcheck-v0.11.0/shellcheck
-          fail-on-error: true
+      # Pinned and checksummed release, first on PATH. This replaces raven-actions/actionlint,
+      # which installed AND ran actionlint; the run is now `make actionlint`, the same command
+      # `make ci` runs on a laptop (explicit -shellcheck path: no fallback to the image's).
+      - name: install pinned actionlint
+        env:
+          AL_VERSION: 1.7.12
+          AL_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/al.tar.gz" \
+            "https://github.com/rhysd/actionlint/releases/download/v${AL_VERSION}/actionlint_${AL_VERSION}_linux_amd64.tar.gz"
+          echo "${AL_SHA256}  $RUNNER_TEMP/al.tar.gz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/actionlint-${AL_VERSION}"
+          tar -xzf "$RUNNER_TEMP/al.tar.gz" -C "$RUNNER_TEMP/actionlint-${AL_VERSION}" actionlint
+          echo "$RUNNER_TEMP/actionlint-${AL_VERSION}" >> "$GITHUB_PATH"
+
+      - name: Pinned linter versions match the gate
+        run: make tools
+
+      - name: actionlint
+        run: make actionlint
 
       # Positive control. A wrong -shellcheck path makes actionlint print 'Rule "shellcheck" was
       # disabled' and exit 0, so the step above can be green with no shellcheck at all. The same
       # actionlint binary and path must find a known SC2086 in a canary workflow.
       - name: shellcheck is live inside actionlint (canary)
-        run: |
-          mkdir -p "$RUNNER_TEMP/canary/.github/workflows"
-          # shellcheck disable=SC2016  # the canary's $(ls) and $f are literal text, on purpose
-          printf 'on: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: |\n          f=$(ls)\n          rm $f\n' \
-            > "$RUNNER_TEMP/canary/.github/workflows/canary.yml"
-          cd "$RUNNER_TEMP/canary"
-          out=$("$RUNNER_TEMP/actionlint-1.7.12/actionlint" -shellcheck="$RUNNER_TEMP/shellcheck-v0.11.0/shellcheck" .github/workflows/canary.yml 2>&1 || true)
-          grep -q SC2086 <<<"$out" || { echo "::error::canary SC2086 not reported; shellcheck is not running inside actionlint"; echo "$out"; exit 1; }
-          echo "canary: SC2086 reported (examined 1 canary workflow)"
+        run: make canary
 
       # actionlint lints workflows; it does not read action.yml. The composite action
       # this repo ships had nothing shellchecking its run: bodies at all.
       - name: shellcheck the composite action
-        run: |
-          python3 -m pip install --quiet pyyaml
-          python3 scripts/extract_action_shell.py > action-steps.sh
-          shellcheck --shell=bash action-steps.sh
+        run: make composite
 
   # This repo is on the supply chain of every consumer that pins the action: a moved
   # tag in OUR workflows is one more way to change what runs against their cloud. Same
@@ -96,15 +99,4 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Reject mutable action refs
-        run: |
-          # Matches `uses: owner/repo@ref` where ref is not a 40-char hex SHA.
-          # Local (`./...`) refs are excluded by `[^./]`.
-          # action.yml is scanned too: it is a composite action, so a `uses:` added
-          # there runs inside every consumer's provisioning job. Scanning only
-          # .github/workflows would leave the file this repo actually ships unguarded.
-          if grep -rnP '^\s*(-\s*)?uses:\s*[^./][^@]+@(?![0-9a-f]{40}\s*($|#))' \
-               --include='*.yml' --include='*.yaml' .github/workflows action.yml; then
-            echo "::error::Third-party actions must be pinned to a full commit SHA."
-            exit 1
-          fi
-          echo "All third-party action references are SHA-pinned."
+        run: make pinned
