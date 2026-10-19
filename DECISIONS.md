@@ -5,6 +5,8 @@ the alternatives were. Newest first.
 
 ## Index
 
+16 entries. Newest first.
+
 - [2026-10-19 — Local gate == CI: make ci, ci.yml calls the same targets, pre-push hook](#2026-10-19--local-gate--ci-make-ci-ciyml-calls-the-same-targets-pre-push-hook)
 - [2026-10-19 — CI pins actionlint and shellcheck](#2026-10-19--ci-pins-actionlint-and-shellcheck)
 - [2026-09-23 — `v1.7.0` cut on `a016dda`: capability expansion, a minor](#2026-09-23--v170-cut-on-a016dda-capability-expansion-a-minor)
@@ -21,8 +23,6 @@ the alternatives were. Newest first.
 - [2026-08-21 — caller inputs move to `env:`; CI grows actionlint and lints `action.yml` itself](#2026-08-21--caller-inputs-move-to-env-ci-grows-actionlint-and-lints-actionyml-itself)
 - [2026-08-20 — SHA-pin this repo's own actions and enforce it in CI](#2026-08-20--sha-pin-this-repos-own-actions-and-enforce-it-in-ci)
 - [2026-08-20 — port the two mutation-path engine fixes from the consumer; release v1.0.1](#2026-08-20--port-the-two-mutation-path-engine-fixes-from-the-consumer-release-v101)
-
----
 
 ## 2026-10-19 — Local gate == CI: make ci, ci.yml calls the same targets, pre-push hook
 
