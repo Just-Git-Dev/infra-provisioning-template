@@ -13,8 +13,8 @@ the secret `<d>-env` is expected to hold EXACTLY this policy, derived from the c
 Reads are `secrets get-iam-policy <d>-env --project <p> --format=json` (stdout = policy JSON; empty
 stdout = no such secret). Anything else is a finding: a missing line, an extra member, an extra
 role, any binding carrying a `condition`. The audit is registered as HANDLERS["secret_audit"]
-(reports `::warning::`, never fails) and PRUNERS["secret_audit"] (same audit, fails on a finding or
-on zero examined when some `deployed_by` exists). It issues NO mutating gcloud call and prints
+(reports `::warning::`, never fails) and PRUNERS["secret_audit"] (same audit, fails on a finding
+only; all secrets absent = `examined 0 secret(s) (N absent: not adopted yet)`, exit 0). It issues NO mutating gcloud call and prints
 `examined N secret(s)`. An absent secret is `info`, not examined, not a finding.
 """
 import io
@@ -174,12 +174,20 @@ def test_absent_secret_is_info_and_not_examined():
     assert "examined 1 secret(s)" in out and "issuer-env" in out, out
 
 
-def test_zero_examined_fails_when_a_deployed_by_exists():
-    rec, out, msg = run(P.PRUNERS["secret_audit"], cfg("api"), secret_reads({}))
-    assert msg and "examined 0" in msg, (msg, out)
-    # report mode still prints the count and does not fail
-    rec, out, msg = run(P.HANDLERS["secret_audit"], cfg("api"), secret_reads({}))
-    assert msg is None and "examined 0 secret(s)" in out, (msg, out)
+def test_all_absent_is_info_in_both_modes_and_states_the_absent_count():
+    # devops ruling 2026-10-20: absent <d>-env = info; prune must not go red for "not adopted yet"
+    for h in (P.PRUNERS["secret_audit"], P.HANDLERS["secret_audit"]):
+        rec, out, msg = run(h, cfg("api", "issuer"), secret_reads({}))
+        assert msg is None, (msg, out)
+        assert "examined 0 secret(s) (2 absent: not adopted yet)" in out, out
+
+
+def test_prune_still_fails_on_drift_when_other_secrets_are_absent():
+    pol = good_policy("api")
+    pol[ACCESSOR].append("user:stranger@example.com")
+    rec, out, msg = run(P.PRUNERS["secret_audit"], cfg("api", "issuer"), secret_reads({"api-env": pol}))
+    assert msg and "stranger" in msg, (msg, out)
+    assert "examined 1 secret(s) (1 absent: not adopted yet)" in out, out
 
 
 def test_zero_examined_is_fine_when_no_deployed_by_exists():

@@ -1038,10 +1038,12 @@ def _secret_audit_findings(cfg, project):
     return findings, examined
 
 
-def _secret_audit_summary(findings, examined, tail):
+def _secret_audit_summary(findings, examined, tail, absent=0):
     for f in findings:
         print(f"::warning::secret_audit {f}")
-    print(f"secret_audit: examined {examined} secret(s), {len(findings)} finding(s)"
+    print(f"secret_audit: examined {examined} secret(s)"
+          + (f" ({absent} absent: not adopted yet)" if absent else "")
+          + f", {len(findings)} finding(s)"
           + (f" - {tail}" if findings else ""))
 
 
@@ -1050,20 +1052,20 @@ def report_secret_policies(cfg, project):
     `::warning::` lines and a count; never fails, never changes anything."""
     print("secret_audit:")
     findings, examined = _secret_audit_findings(cfg, project)
-    _secret_audit_summary(findings, examined, "a human reviews them; `--prune` fails on them")
+    absent = len(_expected_secret_policies(cfg, project)) - examined
+    _secret_audit_summary(findings, examined, "a human reviews them; `--prune` fails on them", absent)
 
 
 def audit_secret_policies(cfg, project):
-    """The `--prune` variant of `report_secret_policies`: same detect-only audit, but a finding (or
-    examining zero secrets although some service names a deployer) fails the run. Never removes
+    """The `--prune` variant of `report_secret_policies`: same detect-only audit, but a finding fails the run (an absent secret is
+    info, devops ruling 2026-10-20; gout already fails loudly on an unreadable one). Never removes
     anything: the identity that benefits from a grant must not be the one that removes it."""
     print("audit secret_audit:")
     findings, examined = _secret_audit_findings(cfg, project)
-    _secret_audit_summary(findings, examined, "not removed by design")
+    absent = len(_expected_secret_policies(cfg, project)) - examined
+    _secret_audit_summary(findings, examined, "not removed by design", absent)
     if findings:
         sys.exit("secret audit FAILED, unexpected policy lines: " + "; ".join(findings))
-    if _expected_secret_policies(cfg, project) and examined == 0:
-        sys.exit("secret audit examined 0 secrets - none readable, so it proves nothing")
 
 
 def prune_provisioner(cfg, project):
