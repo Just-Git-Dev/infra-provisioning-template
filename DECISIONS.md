@@ -5,8 +5,9 @@ the alternatives were. Newest first.
 
 ## Index
 
-21 entries. Newest first.
+22 entries. Newest first.
 
+- [2026-10-20 — secret_audit: detect-only audit of the policy of each <d>-env secret](#2026-10-20--secret_audit-detect-only-audit-of-the-policy-of-each-d-env-secret)
 - [2026-10-20 — service_agents: declare a Google service agent's role on a runtime SA (phase 1, declare-only)](#2026-10-20--service_agents-declare-a-google-service-agents-role-on-a-runtime-sa-phase-1-declare-only)
 - [2026-10-20 — deployed_by hardening: deployer must exist, own-deployer only, prune-safe](#2026-10-20--deployed_by-hardening-deployer-must-exist-own-deployer-only-prune-safe)
 - [2026-10-20 — One writer per SA policy: sa_audit loses the same-org allowance, new deployed_by key](#2026-10-20--one-writer-per-sa-policy-sa_audit-loses-the-same-org-allowance-new-deployed_by-key)
@@ -28,6 +29,38 @@ the alternatives were. Newest first.
 - [2026-08-21 — caller inputs move to `env:`; CI grows actionlint and lints `action.yml` itself](#2026-08-21--caller-inputs-move-to-env-ci-grows-actionlint-and-lints-actionyml-itself)
 - [2026-08-20 — SHA-pin this repo's own actions and enforce it in CI](#2026-08-20--sha-pin-this-repos-own-actions-and-enforce-it-in-ci)
 - [2026-08-20 — port the two mutation-path engine fixes from the consumer; release v1.0.1](#2026-08-20--port-the-two-mutation-path-engine-fixes-from-the-consumer-release-v101)
+
+## 2026-10-20 — secret_audit: detect-only audit of the policy of each <d>-env secret
+
+**What.** A new detect-only engine subsystem `secret_audit` (gcp provider). For every runtime SA named
+`<d>-run` that declares `deployed_by: [<d>-deployer]`, it reads the IAM policy of the secret `<d>-env`
+and compares it with the policy derived from the JGD config ALONE (never from the repos register):
+`<d>-run` holds `roles/secretmanager.secretAccessor`, and `<d>-deployer` holds the sync roles
+`roles/secretmanager.secretAccessor`, `roles/secretmanager.secretVersionManager` and
+`roles/secretmanager.viewer`. Nothing else, and no IAM condition. A missing line, an extra member, an
+extra role or a conditioned binding is a finding. It is registered like `sa_audit`: a reporting handler
+on every run (`::warning::`, never fails) and a failing `--prune` variant, so `--only secret_audit`
+works and the daily sa-audit workflow can add it later. It prints `examined N secret(s)`.
+
+**Detect-only contract.** It issues no mutating gcloud call, ever: no add/remove binding, no
+set-iam-policy, no create. A secret that does not exist is `info` (the service may have no secret yet)
+and is not counted as examined. The failing variant also fails when some `deployed_by` exists but it
+examined zero secrets, because a check that cannot say how many items it examined is not evidence.
+
+**Why.** Owner ruling 24 (design `plans/2026-10-20-repos-as-code-secrets-design.md` in
+infra-provisioning, section 8): a `<d>-env` secret's policy has one writer, the project's
+`repos-secrets` feature, and JGD declares no binding on it. Detection is the only control that sees a
+human or a compromised repo widening it, because the project's `repo-admin` can set IAM on secrets by
+design.
+
+**Alternatives.** Reading the register to learn which services have a secret (rejected: ruling 12,
+derive from JGD); a pruner that removes extra lines (rejected: the identity that benefits from a grant
+must not be the one that removes it, the `sa_audit` rule); a custom no-destroy syncer role (superseded
+by owner Q3: the sync destroys old versions, so the predefined roles apply).
+
+**Check.** `tests/test_secret_audit.py`; `tests/test_engine.py::test_handlers_are_access_only` lists
+the new registry entry. Not wired into any workflow yet: the pin bump and the daily audit are a later
+wave.
 
 ## 2026-10-20 — service_agents: declare a Google service agent's role on a runtime SA (phase 1, declare-only)
 
