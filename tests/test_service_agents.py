@@ -12,22 +12,13 @@ import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "engine"))
-import pytest  # noqa: E402
-import core  # noqa: E402
+import core  # noqa: E402,F401
 from providers import gcp as P  # noqa: E402
 from test_repo_links import _run  # noqa: E402
 
 NUM = "750513647348"
 AGENT = f"serviceAccount:service-{NUM}@gcp-sa-pubsub.iam.gserviceaccount.com"
 TC = "roles/iam.serviceAccountTokenCreator"
-RUN_EMAIL = "api-run@p.iam.gserviceaccount.com"
-
-
-@pytest.fixture(autouse=True)
-def _fresh_cache():
-    P._PROJECT_NUMBERS.clear()
-    yield
-    P._PROJECT_NUMBERS.clear()
 
 
 def _cfg(**extra):
@@ -36,6 +27,7 @@ def _cfg(**extra):
 
 
 def _reads(bindings, number=NUM, counter=None):
+    P._PROJECT_NUMBERS.clear()      # every test starts with a cold per-run cache
     pol = json.dumps({"bindings": [{"role": r, "members": m} for r, m in bindings.items()]})
 
     def reads(args):
@@ -71,13 +63,13 @@ def test_declared_agent_with_an_extra_role_is_flagged():
     assert not any("UNDECLARED" in l and "TokenCreator" in l for l in out.splitlines()), out
 
 
-@pytest.mark.parametrize("bad", ["nope", "", [],["pubsub", "nope"], ["PubSub"], "pubsub"])
-def test_bad_service_agents_value_fails_at_plan_time(bad):
-    cfg = _cfg(service_agents=bad)
-    rec, out, msg = _run(P.audit_service_accounts, cfg, _reads({}))
-    assert msg and "service_agents" in msg, (msg, out)
-    rec, out, msg = _run(P.ensure_act_as, cfg, _reads({}))     # dry-run plan path too
-    assert msg and "service_agents" in msg, (msg, out)
+def test_bad_service_agents_value_fails_at_plan_time():
+    for bad in ["nope", "", [], ["pubsub", "nope"], ["PubSub"], "pubsub"]:
+        cfg = _cfg(service_agents=bad)
+        rec, out, msg = _run(P.audit_service_accounts, cfg, _reads({}))
+        assert msg and "service_agents" in msg, (bad, msg, out)
+        rec, out, msg = _run(P.ensure_act_as, cfg, _reads({}))     # the apply/plan path too
+        assert msg and "service_agents" in msg, (bad, msg, out)
 
 
 def test_service_agents_on_a_non_run_sa_fails_at_plan_time():
@@ -89,6 +81,7 @@ def test_service_agents_on_a_non_run_sa_fails_at_plan_time():
 
 
 def test_member_derivation_uses_project_number_and_agent_domain():
+    P._PROJECT_NUMBERS.clear()
     P.gout = lambda args, project=None: NUM
     got = P._declared_sa_grants(_cfg(), "p", None)
     assert got["api-run"] == {(TC, AGENT)}
@@ -130,3 +123,17 @@ def test_prune_never_removes_the_declared_agent():
     rec, out, msg = _run(P.prune_act_as, cfg, reads)
     assert not any(AGENT in a for c in rec.calls for a in c), rec.calls
     assert not any("remove-iam-policy-binding" in c and AGENT in " ".join(c) for c in rec.calls)
+
+
+if __name__ == "__main__":
+    fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
+    failed = 0
+    for fn in fns:
+        try:
+            fn()
+            print(f"PASS {fn.__name__}")
+        except BaseException as e:
+            failed += 1
+            print(f"FAIL {fn.__name__}: {type(e).__name__}: {e}")
+    print(f"\n{len(fns)-failed}/{len(fns)} passed")
+    sys.exit(1 if failed else 0)
