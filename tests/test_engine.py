@@ -103,8 +103,10 @@ def test_handlers_are_access_only():
     # `principals` (2026-09-06, ADR-008) binds a HUMAN/GROUP member on one service account.
     # Still access-only and still creates nothing, so the scope line is again unmoved — but it
     # is the first block whose member is a person, so it took a decision record of its own.
+    # `sa_audit` (2026-10-20) is read-only: it reports on every run and never mutates (the
+    # scope line is unmoved; see DECISIONS 2026-10-20 and tests/test_repo_links.py).
     assert set(P.HANDLERS) == {"service_accounts", "act_as", "resource_roles", "principals",
-                               "wif"}
+                               "wif", "sa_audit"}
     assert set(P.PRUNERS) == {"service_accounts", "act_as", "resource_roles", "principals",
                               "provisioner", "sa_audit"}
 

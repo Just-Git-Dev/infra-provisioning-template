@@ -42,6 +42,7 @@ $(VENV)/.stamp: requirements-ci.txt
 tests: venv
 	$(PY) tests/test_engine.py
 	$(PY) tests/test_kubernetes.py
+	$(PY) tests/test_repo_links.py
 	$(PY) tests/test_anchor.py
 	$(PY) tests/test_ci_make_targets.py
 	$(PY) tests/test_pre_push_hook.py

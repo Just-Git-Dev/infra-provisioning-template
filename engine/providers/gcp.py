@@ -782,25 +782,74 @@ def _audit_scope_grants(email, scope, keep):
     return [f"undeclared role {r}" for r in extra]
 
 
-def _same_org_wif_member(member, org):
-    """A principalSet/principal of a pool whose repository is in `org`."""
-    return (member.startswith(("principalSet://", "principal://")) and
-            (f"/attribute.repository/{org}/" in member or f"/subject/repo:{org}/" in member))
+_WIF_SHAPES = ("principalSet://", "principal://")
 
 
-def audit_service_accounts(cfg, project):
-    """DETECT drift on the IAM policy of every DECLARED service account. Never removes anything.
+def _wif_base(cfg, project):
+    """`//iam.googleapis.com/projects/<n>/locations/global/workloadIdentityPools/<pool>/` for THIS
+    project's own pool, or None when no pool is configured. Compared as a whole prefix: an
+    org-name substring says nothing about WHICH pool (or project) a member comes from."""
+    pool = (cfg.get("wif") or {}).get("pool")
+    if not pool:
+        return None
+    num = str(cfg["project"].get("gcp_number") or
+              gout(["projects", "describe", project, "--format=value(projectNumber)"], project))
+    return f"//iam.googleapis.com/projects/{num}/locations/global/workloadIdentityPools/{pool}/"
 
-    A project's repo-admin may bind IAM on its own SAs (ADR-010), so the identity that benefits
-    from the grant can also widen it. Like `_audit_scope_grants`, this reports and fails; a human
-    decides. Allowed members: a same-org WIF principalSet/principal, an `act_as` holder declared
-    for this SA, or a `principals:` member. Anything else is UNDECLARED.
-    """
-    print("audit service_accounts:")
+
+def _own_pool_same_org(member, base, org):
+    """A principalSet/principal of THIS project's pool whose repository is in `org`."""
+    if not base or not member.startswith(_WIF_SHAPES):
+        return False
+    rest = member.split(":", 1)[1]
+    return rest.startswith(base) and rest[len(base):].startswith(
+        (f"attribute.repository/{org}/", f"subject/repo:{org}/"))
+
+
+def _declared_sa_grants(cfg, project, base):
+    """{target SA name: {(role, member), ...}} — what config says each SA's own policy holds.
+    WIF links (`wif_repos` principalSets, `wif_subjects` principals) under workloadIdentityUser,
+    `act_as` holders under serviceAccountUser, SA-level `resource_roles.service_accounts` and
+    `principals[].resource_roles.service_accounts` under the roles they name."""
+    wif_user, sa_user = "roles/iam.workloadIdentityUser", "roles/iam.serviceAccountUser"
+    sas = cfg.get("service_accounts") or []
+    out = {sa["name"]: set() for sa in sas}
+    for sa in sas:
+        got = out[sa["name"]]
+        for repo in sa.get("wif_repos") or []:
+            if base:
+                got.add((wif_user, f"principalSet:{base}attribute.repository/{repo}"))
+        for link in sa.get("wif_subjects") or []:
+            if base:
+                got.add((wif_user, f"principal:{base}subject/repo:{link['repo']}:environment:"
+                                   f"{link['environment']}"))
+        holder = f"serviceAccount:{sa_email(sa['name'], project)}"
+        for target in sa.get("act_as") or []:
+            out.setdefault(target, set()).add((sa_user, holder))
+        for target, roles in ((sa.get("resource_roles") or {}).get("service_accounts") or {}).items():
+            for role in roles or []:
+                out.setdefault(target, set()).add((_qualify(role), holder))
+    for p in cfg.get("principals") or []:
+        member = (p or {}).get("member")
+        kinds = (p or {}).get("resource_roles") or {}
+        for target, roles in (kinds.get("service_accounts") or {}).items():
+            for role in roles or []:
+                out.setdefault(target, set()).add((_qualify(role), member))
+    return out
+
+
+def _sa_audit_findings(cfg, project):
+    """([finding, ...], examined) — reads one policy per declared SA; mutates nothing.
+
+    A (role, member) binding is expected when config declares that exact pair, or when it is a
+    same-org member of THIS project's own pool holding workloadIdentityUser. The exception: an SA
+    that config links ONLY by `wif_subjects` (no `wif_repos`) accepts nothing but its declared
+    subjects, so a repo-wide principalSet added to it (or another environment) is UNDECLARED."""
     org = cfg["project"]["github_org"]
     sas = cfg.get("service_accounts") or []
-    principals = {(p or {}).get("member") for p in cfg.get("principals") or []}
-    problems, examined = [], 0
+    base = _wif_base(cfg, project)
+    declared = _declared_sa_grants(cfg, project, base)
+    findings, examined = [], 0
     for sa in sas:
         email = sa_email(sa["name"], project)
         raw = gout(["iam", "service-accounts", "get-iam-policy", email, "--project", project,
@@ -809,20 +858,59 @@ def audit_service_accounts(cfg, project):
             c("skip", f"{sa['name']}: no readable policy (SA absent?)")
             continue
         examined += 1
-        declared = {f"serviceAccount:{sa_email(o['name'], project)}"
-                    for o in sas if sa["name"] in (o.get("act_as") or [])} | principals
-        bad = [(b.get("role"), m) for b in (json.loads(raw).get("bindings") or [])
-               for m in b.get("members") or []
-               if m not in declared and not _same_org_wif_member(m, org)]
+        subject_only = bool(sa.get("wif_subjects")) and not sa.get("wif_repos")
+        want = declared.get(sa["name"], set())
+        bad = []
+        for b in json.loads(raw).get("bindings") or []:
+            role = b.get("role")
+            for m in b.get("members") or []:
+                if (role, m) in want:
+                    continue
+                if (role == "roles/iam.workloadIdentityUser" and not subject_only
+                        and _own_pool_same_org(m, base, org)):
+                    continue
+                bad.append((role, m))
         for role, m in bad:
             c("err", f"UNDECLARED on {sa['name']}: {m} holds {role}")
-        problems += [f"{sa['name']}: {m} holds {role}" for role, m in bad]
+        findings += [f"{sa['name']}: {m} holds {role}" for role, m in bad]
         if not bad:
-            c("ok", f"{sa['name']}: every binding is same-org or declared")
-    if problems:
+            c("ok", f"{sa['name']}: every binding is declared")
+    return findings, examined
+
+
+def _warn_findings(findings, examined, tail):
+    for f in findings:
+        print(f"::warning::sa_audit UNDECLARED {f}")
+    print(f"sa_audit: examined {examined} service account(s), {len(findings)} undeclared binding(s)"
+          + (f" — {tail}" if findings else ""))
+
+
+def report_service_accounts(cfg, project):
+    """DETECT drift on the IAM policy of every DECLARED service account, on EVERY Provision run
+    (dry-run and apply). Reports `::warning::` lines plus a summary; never fails the run, never
+    removes anything. The failing variant is `audit_service_accounts` (under --prune)."""
+    print("sa_audit:")
+    findings, examined = _sa_audit_findings(cfg, project)
+    _warn_findings(findings, examined, "a human reviews them; `--prune` fails on them")
+
+
+def audit_service_accounts(cfg, project):
+    """The `--prune` variant of `report_service_accounts`: same detect-only audit, but a finding
+    (or examining zero SAs when some are declared) fails the run. Never removes anything.
+
+    A project's repo-admin may bind IAM on its own SAs (ADR-010), so the identity that benefits
+    from the grant can also widen it. Like `_audit_scope_grants`, this reports and fails; a human
+    decides. A binding is a (role, member) pair; see `_sa_audit_findings` for what is expected."""
+    print("audit service_accounts:")
+    findings, examined = _sa_audit_findings(cfg, project)
+    _warn_findings(findings, examined, "not removed by design")
+    if findings:
         c("err", "not removed by design — a binding is changed by a human, "
                  "not by the identity that benefits from it")
-        sys.exit("service account audit FAILED, undeclared bindings: " + "; ".join(problems))
+        sys.exit("service account audit FAILED, undeclared bindings: " + "; ".join(findings))
+    if cfg.get("service_accounts") and examined == 0:
+        sys.exit("service account audit examined 0 service accounts — nothing readable, "
+                 "so it proves nothing")
 
 
 def prune_provisioner(cfg, project):
@@ -892,6 +980,10 @@ PRUNERS = {
     "provisioner": prune_provisioner,
     "sa_audit": audit_service_accounts,
 }
+
+# Read-only and registered LAST (run order): reports on EVERY run, dry-run included, and never
+# fails or fixes. Under --prune the registry above runs instead and its variant FAILS on findings.
+HANDLERS["sa_audit"] = report_service_accounts
 
 
 # ── provider contract (used by the multi-target CLI loop, ADR-003 §5) ─────────

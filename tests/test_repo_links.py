@@ -242,6 +242,173 @@ def test_audit_examines_every_declared_sa_not_just_the_first():
     assert any("svc-a@p." in s for s in seen) and any("deployer@p." in s for s in seen), seen
 
 
+# ── (g) role-aware audit (critic W3 B2, M1) ──────────────────────────────────
+ROLE_TC = "roles/iam.serviceAccountTokenCreator"
+ROLE_SAUSER = "roles/iam.serviceAccountUser"
+ADMIN_SET = f"principalSet:{POOLBASE}/attribute.repository/Example-Org/project"
+
+
+def _role_cfg(**extra):
+    cfg = _cfg([
+        {"name": "repo-admin",
+         "wif_subjects": [{"repo": "Example-Org/project", "environment": "repo-admin"}]},
+        {"name": "github-rotator", "wif_repos": ["Example-Org/payments-api"]},
+        {"name": "deployer", "act_as": ["github-rotator"]}])
+    cfg.update(extra)
+    return cfg
+
+
+def _reads_for(policies):
+    """{sa name: {role: [members]}}; every other SA reads an empty policy."""
+    def reads(args):
+        j = " ".join(args)
+        if "get-iam-policy" in j and "--format=json" in j:
+            for name, pol in policies.items():
+                if f"{name}@p." in j:
+                    return json.dumps({"bindings": [{"role": r, "members": m} for r, m in pol.items()]})
+            return json.dumps({"bindings": []})
+        return ""
+    return reads
+
+
+def _flagged(out, needle):
+    return any(needle in l and "UNDECLARED" in l for l in out.splitlines())
+
+
+def _n_flagged(out):
+    """Distinct findings: the `✗` lines (the `::warning::` lines repeat them)."""
+    return sum("UNDECLARED" in l and "✗" in l for l in out.splitlines())
+
+
+def test_audit_flags_repo_admin_subject_holding_tokencreator_on_another_sa():
+    # the critic's example: repo-admin widens itself on github-rotator
+    reads = _reads_for({"github-rotator": {ROLE_TC: [ENV_MEMBER], ROLE_WIF: [
+        f"principalSet:{POOLBASE}/attribute.repository/Example-Org/payments-api"]}})
+    rec, out, exit_msg = _run(P.audit_service_accounts, _role_cfg(), reads)
+    assert exit_msg and "undeclared" in exit_msg.lower(), (exit_msg, out)
+    assert _flagged(out, "subject/repo:Example-Org/project:environment:repo-admin"), out
+    assert not _flagged(out, "payments-api"), f"declared repo link flagged:\n{out}"
+
+
+def test_audit_same_org_wif_member_is_allowed_only_with_workload_identity_user():
+    reads = _reads_for({"deployer": {ROLE_SAUSER: [SAME_ORG_SET], "roles/owner": [SAME_ORG_SET]}})
+    rec, out, exit_msg = _run(P.audit_service_accounts, _role_cfg(), reads)
+    assert exit_msg and "undeclared" in exit_msg.lower(), (exit_msg, out)
+    assert _flagged(out, "payments-api") and "roles/owner" in out, out
+
+
+def test_audit_flags_repo_wide_principalset_on_an_sa_linked_only_by_subject():
+    reads = _reads_for({"repo-admin": {ROLE_WIF: [ENV_MEMBER, ADMIN_SET]}})
+    rec, out, exit_msg = _run(P.audit_service_accounts, _role_cfg(), reads)
+    assert exit_msg and "undeclared" in exit_msg.lower(), (exit_msg, out)
+    assert _flagged(out, "attribute.repository/Example-Org/project"), out
+    assert not _flagged(out, "environment:repo-admin"), f"the declared subject was flagged:\n{out}"
+
+
+def test_audit_subject_linked_sa_accepts_its_declared_subject_only():
+    other_env = (f"principal:{POOLBASE}/subject/repo:Example-Org/project:environment:other")
+    reads = _reads_for({"repo-admin": {ROLE_WIF: [ENV_MEMBER, other_env]}})
+    rec, out, exit_msg = _run(P.audit_service_accounts, _role_cfg(), reads)
+    assert exit_msg and _flagged(out, "environment:other"), (exit_msg, out)
+    assert not _flagged(out, "environment:repo-admin"), out
+
+
+def test_audit_flags_members_of_another_pool_or_project_even_with_the_same_org():
+    other_pool = ("principalSet://iam.googleapis.com/projects/42/locations/global/"
+                  "workloadIdentityPools/other-pool/attribute.repository/Example-Org/payments-api")
+    other_proj = ("principalSet://iam.googleapis.com/projects/999/locations/global/"
+                  f"workloadIdentityPools/{POOL}/attribute.repository/Example-Org/payments-api")
+    reads = _reads_for({"deployer": {ROLE_WIF: [SAME_ORG_SET, other_pool, other_proj]}})
+    rec, out, exit_msg = _run(P.audit_service_accounts, _role_cfg(), reads)
+    assert exit_msg and "undeclared" in exit_msg.lower(), (exit_msg, out)
+    assert _flagged(out, "other-pool") and _flagged(out, "projects/999"), out
+    # the project's own pool member (positive control) is the one line NOT flagged
+    assert _n_flagged(out) == 2, out
+
+
+def test_audit_declared_actor_is_allowed_only_for_the_declared_role():
+    ok = _reads_for({"github-rotator": {ROLE_SAUSER: [DECLARED_ACTOR]}})
+    rec, out, exit_msg = _run(P.audit_service_accounts, _role_cfg(), ok)
+    assert exit_msg is None, (exit_msg, out)
+    for bad_role in ("roles/owner", ROLE_TC):
+        bad = _reads_for({"github-rotator": {ROLE_SAUSER: [DECLARED_ACTOR], bad_role: [DECLARED_ACTOR]}})
+        rec, out, exit_msg = _run(P.audit_service_accounts, _role_cfg(), bad)
+        assert exit_msg and _flagged(out, "deployer@p."), f"{bad_role} on an act_as holder passed:\n{out}"
+        assert bad_role in out
+
+
+def test_audit_principals_are_allowed_only_for_their_declared_role():
+    cfg = _role_cfg(principals=[{"member": "group:ops@example.com", "resource_roles": {
+        "service_accounts": {"github-rotator": [ROLE_TC]}}}])
+    ok = _reads_for({"github-rotator": {ROLE_TC: ["group:ops@example.com"]}})
+    rec, out, exit_msg = _run(P.audit_service_accounts, cfg, ok)
+    assert exit_msg is None, (exit_msg, out)
+    bad = _reads_for({"github-rotator": {"roles/owner": ["group:ops@example.com"]},
+                      "repo-admin": {ROLE_TC: ["group:ops@example.com"]}})
+    rec, out, exit_msg = _run(P.audit_service_accounts, cfg, bad)
+    assert exit_msg and _n_flagged(out) == 2, (exit_msg, out)
+
+
+def test_audit_sa_level_resource_roles_on_service_accounts_are_declared_not_flagged():
+    # M1: `api-run: [iam.serviceAccountAdmin]` style declaration must not be a false UNDECLARED
+    cfg = _role_cfg()
+    cfg["service_accounts"][2]["resource_roles"] = {
+        "service_accounts": {"github-rotator": ["iam.serviceAccountAdmin"]}}
+    pol = {"github-rotator": {"roles/iam.serviceAccountAdmin": [DECLARED_ACTOR]}}
+    rec, out, exit_msg = _run(P.audit_service_accounts, cfg, _reads_for(pol))
+    assert exit_msg is None, f"declared resource_roles flagged: {exit_msg}\n{out}"
+    # control: the same member with an undeclared role on that SA is still flagged
+    pol = {"github-rotator": {"roles/iam.serviceAccountAdmin": [DECLARED_ACTOR],
+                              "roles/owner": [DECLARED_ACTOR]}}
+    rec, out, exit_msg = _run(P.audit_service_accounts, cfg, _reads_for(pol))
+    assert exit_msg and "roles/owner" in out, (exit_msg, out)
+
+
+# ── (h) the audit runs on EVERY Provision run and only fails under --prune (M5) ──
+def _run_mode(handler, cfg, reads, dry):
+    rec = Recorder(reads)
+    rec.install()
+    core.DRY = dry
+    buf, exit_msg = io.StringIO(), None
+    try:
+        with redirect_stdout(buf):
+            try:
+                handler(cfg, "p")
+            except SystemExit as e:
+                exit_msg = str(e)
+    finally:
+        core.DRY = False
+    return rec, buf.getvalue(), exit_msg
+
+
+def test_audit_is_a_normal_handler_that_reports_and_never_fails_in_both_modes():
+    assert "sa_audit" in P.HANDLERS, "sa_audit must run on every Provision run (plan: Provision reports)"
+    reads = _reads_for({"github-rotator": {"roles/owner": ["user:stranger@example.com"]}})
+    for dry in (True, False):
+        rec, out, exit_msg = _run_mode(P.HANDLERS["sa_audit"], _role_cfg(), reads, dry)
+        assert exit_msg is None, f"report mode must not fail the run (dry={dry}): {exit_msg}"
+        warns = [l for l in out.splitlines() if l.startswith("::warning::")]
+        assert warns and "stranger@example.com" in warns[0], out
+        assert "1 undeclared" in out and "examined 3" in out, out
+        assert rec.calls == [], f"audit made mutating calls (dry={dry}): {rec.calls}"
+
+
+def test_audit_prune_variant_still_fails_and_is_detect_only_in_both_modes():
+    reads = _reads_for({"github-rotator": {"roles/owner": ["user:stranger@example.com"]}})
+    for dry in (True, False):
+        rec, out, exit_msg = _run_mode(P.PRUNERS["sa_audit"], _role_cfg(), reads, dry)
+        assert exit_msg and "undeclared" in exit_msg.lower(), (dry, exit_msg, out)
+        assert "::warning::" in out and "examined 3" in out, out
+        assert rec.calls == [], rec.calls
+
+
+def test_audit_fails_when_it_examines_zero_service_accounts():
+    # fleet rule: a check that cannot say how many items it examined is not evidence
+    cfg = _role_cfg()
+    rec, out, exit_msg = _run_mode(P.PRUNERS["sa_audit"], cfg, lambda a: "", False)
+    assert exit_msg and "examined 0" in exit_msg, (exit_msg, out)
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0
