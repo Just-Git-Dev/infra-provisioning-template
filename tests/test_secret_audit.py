@@ -108,7 +108,7 @@ def test_exact_expected_policy_is_clean_and_counted():
                             secret_reads({"api-env": good_policy("api"),
                                           "issuer-env": good_policy("issuer")}))
         assert msg is None, (msg, out)
-        assert "examined 2 secret(s)" in out and "0 undeclared" in out, out
+        assert "examined 2 secret(s)" in out and "0 finding(s)" in out, out
         assert rec.calls == [], rec.calls
 
 
