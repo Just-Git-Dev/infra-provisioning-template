@@ -5,8 +5,9 @@ the alternatives were. Newest first.
 
 ## Index
 
-16 entries. Newest first.
+17 entries. Newest first.
 
+- [2026-10-20 — `wif_subjects` (environment-scoped WIF link) and `sa_audit` (detect-only SA policy audit under `--prune`)](#2026-10-20--wif_subjects-environment-scoped-wif-link-and-sa_audit-detect-only-sa-policy-audit-under---prune)
 - [2026-10-19 — Local gate == CI: make ci, ci.yml calls the same targets, pre-push hook](#2026-10-19--local-gate--ci-make-ci-ciyml-calls-the-same-targets-pre-push-hook)
 - [2026-10-19 — CI pins actionlint and shellcheck](#2026-10-19--ci-pins-actionlint-and-shellcheck)
 - [2026-09-23 — `v1.7.0` cut on `a016dda`: capability expansion, a minor](#2026-09-23--v170-cut-on-a016dda-capability-expansion-a-minor)
@@ -23,6 +24,40 @@ the alternatives were. Newest first.
 - [2026-08-21 — caller inputs move to `env:`; CI grows actionlint and lints `action.yml` itself](#2026-08-21--caller-inputs-move-to-env-ci-grows-actionlint-and-lints-actionyml-itself)
 - [2026-08-20 — SHA-pin this repo's own actions and enforce it in CI](#2026-08-20--sha-pin-this-repos-own-actions-and-enforce-it-in-ci)
 - [2026-08-20 — port the two mutation-path engine fixes from the consumer; release v1.0.1](#2026-08-20--port-the-two-mutation-path-engine-fixes-from-the-consumer-release-v101)
+
+## 2026-10-20 — `wif_subjects` (environment-scoped WIF link) and `sa_audit` (detect-only SA policy audit under `--prune`)
+
+**What.** Two additions to the service-account section of the engine. `wif_subjects: [{repo, environment}]`
+on an SA binds `roles/iam.workloadIdentityUser` for the single identity
+`principal://iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<pool>/subject/repo:<Org>/<repo>:environment:<env>`
+(idempotent, same shape as `wif_repos`). `sa_audit` is a detect-only audit of the IAM policy of every
+DECLARED service account; it runs under `--prune` beside the existing audits, reports each binding it
+does not recognise, never removes one, and fails the run.
+
+**Why `wif_subjects`.** `wif_repos` binds the repo-wide `principalSet` (`attribute.repository/<Org>/<repo>`),
+so a job on ANY branch or workflow of that repo may impersonate the SA. For an SA that can create
+service accounts and bind IAM on its own project, that is too wide: a pull-request branch could use it.
+The `principal://…/subject/repo:<Org>/<repo>:environment:<env>` member matches only a job that runs in
+that GitHub environment, so the environment's required reviewers and branch rule become the gate.
+It is a separate key, not a flag on `wif_repos`, so the two member shapes are never confused and an
+SA can hold either.
+
+**Why `sa_audit`.** A project's own admin identity may set IAM on its service accounts, so the identity
+that benefits from a grant can also widen it. Same reasoning as the provisioner-scope audit: an identity
+that can silently "fix" its own drift is not being policed, so this reports and fails and a human
+decides. Allowed members: a WIF principal or principalSet of the project's own GitHub org, an `act_as`
+holder declared for that SA, or a `principals:` member; anything else is UNDECLARED.
+
+**Why not remove what it finds.** The pruners remove only what this repo can prove it owns. A binding on
+an SA that nobody declared may be another subsystem's, or a break-glass grant; deleting it from a
+reconcile loop is the failure the conservative pruners exist to avoid.
+
+**Why only under `--prune`.** It reads one policy per declared SA, and a failing audit blocks the run;
+`--prune` is already the destructive-adjacent path that humans run on purpose. A plain provision run
+stays quiet and cheap.
+
+**Check.** `tests/test_repo_links.py` and `tests/test_engine.py` cover the member shape, idempotence,
+and the audit's report-and-fail behaviour.
 
 ## 2026-10-19 — Local gate == CI: make ci, ci.yml calls the same targets, pre-push hook
 
