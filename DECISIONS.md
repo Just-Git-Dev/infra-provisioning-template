@@ -5,8 +5,9 @@ the alternatives were. Newest first.
 
 ## Index
 
-20 entries. Newest first.
+21 entries. Newest first.
 
+- [2026-10-20 — service_agents: declare a Google service agent's role on a runtime SA (phase 1, declare-only)](#2026-10-20--service_agents-declare-a-google-service-agents-role-on-a-runtime-sa-phase-1-declare-only)
 - [2026-10-20 — deployed_by hardening: deployer must exist, own-deployer only, prune-safe](#2026-10-20--deployed_by-hardening-deployer-must-exist-own-deployer-only-prune-safe)
 - [2026-10-20 — One writer per SA policy: sa_audit loses the same-org allowance, new deployed_by key](#2026-10-20--one-writer-per-sa-policy-sa_audit-loses-the-same-org-allowance-new-deployed_by-key)
 - [2026-10-20 — sa_audit is role-aware and runs on every Provision run](#2026-10-20--sa_audit-is-role-aware-and-runs-on-every-provision-run)
@@ -27,6 +28,43 @@ the alternatives were. Newest first.
 - [2026-08-21 — caller inputs move to `env:`; CI grows actionlint and lints `action.yml` itself](#2026-08-21--caller-inputs-move-to-env-ci-grows-actionlint-and-lints-actionyml-itself)
 - [2026-08-20 — SHA-pin this repo's own actions and enforce it in CI](#2026-08-20--sha-pin-this-repos-own-actions-and-enforce-it-in-ci)
 - [2026-08-20 — port the two mutation-path engine fixes from the consumer; release v1.0.1](#2026-08-20--port-the-two-mutation-path-engine-fixes-from-the-consumer-release-v101)
+
+## 2026-10-20 — service_agents: declare a Google service agent's role on a runtime SA (phase 1, declare-only)
+
+**Decision.** New gcp config key `service_agents: [pubsub]` on a `<d>-run` SA DECLARES a known
+Google-managed service agent's FIXED role on that SA, so the exact `sa_audit` (v1.8.0) stops
+flagging it. Phase 1 is declare-only: `_declared_sa_grants` includes the pair; `ensure_act_as`
+and every other ensure path write nothing for it; prune never touches it (Google agents are never
+`owned`). An undeclared agent, or a declared agent holding any other role, is still flagged.
+
+**Why.** Owner ruling 21 (one writer per SA policy, no same-org allowance) left a real, Google-
+required grant with no config route: on auto-mahn the Pub/Sub agent
+`service-<number>@gcp-sa-pubsub.iam.gserviceaccount.com` must hold
+`roles/iam.serviceAccountTokenCreator` on `api-run` for push OIDC auth
+(https://cloud.google.com/pubsub/docs/authenticate-push-subscriptions). SA-level
+`resource_roles` members are always declared SAs and `principals` refuses `serviceAccount:`.
+A per-SA key with an ALLOWLIST (short name -> agent domain + fixed roles) keeps the control
+tight: widening `SERVICE_AGENTS` is a decision, not a commit. The project number is read with a
+read-only `gcloud projects describe` (cached per run); the run fails loudly if it cannot be
+read, never guessing a member.
+
+**Config.**
+
+    service_accounts:
+      - name: api-run
+        service_agents: [pubsub]
+
+Unknown name, non-list/empty value, or a non-`-run` SA fails at plan time.
+
+**Phase 2 (designed, not built).** JGD ENSURES the binding (`add-iam-policy-binding`, idempotent
+via the existing has-member check) with retry/backoff, because a Google agent is created lazily
+(first Pub/Sub use) and may not exist when the SA policy is written; then the project drops its
+own script lines (AutoMahn `infra/gcp/bootstrap-pubsub-eventworker.sh`, `bootstrap-gcp.sh`).
+Until then the project script stays the writer and this key only keeps the audit honest.
+
+**For infra-provisioning (not edited here).** Its CLAUDE.md line "Declare only SAs we own. Omit
+Google-managed service agents" needs a carve-out: still omit agents as SA ENTRIES, but they may
+appear via `service_agents` on a runtime SA.
 
 ## 2026-10-20 — deployed_by hardening: deployer must exist, own-deployer only, prune-safe
 

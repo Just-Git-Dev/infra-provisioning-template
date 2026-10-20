@@ -18,7 +18,7 @@ Two providers, selected per-target via a `kind` discriminator in `config.yaml`:
 
 | Provider | Owns (access/identity + tenancy — NOT workloads) |
 |---|---|
-| **gcp** | service accounts + their project IAM roles (`service_accounts`), SA→SA impersonation (`act_as`, and `deployed_by: [<d>-deployer]` declared on the runtime SA), **roles scoped to a single resource** (`resource_roles`), app-repo Workload-Identity Federation (`wif`) |
+| **gcp** | service accounts + their project IAM roles (`service_accounts`), SA→SA impersonation (`act_as`, and `deployed_by: [<d>-deployer]` declared on the runtime SA; `service_agents: [pubsub]` declares a Google service agent's fixed role on a `<d>-run` SA so `sa_audit` accepts it, declare-only), **roles scoped to a single resource** (`resource_roles`), app-repo Workload-Identity Federation (`wif`) |
 | **kubernetes** | Namespace, ResourceQuota, NetworkPolicy, RBAC, KSA + Workload-Identity (`namespace`/`quota`/`network_policy`/`rbac`/`ksa`); and standing exposure infra — Service, Certificate, Ingress, HPA, PDB |
 
 **Deliberately not owned:** the Deployment/workload + image (your CD owns those) and
