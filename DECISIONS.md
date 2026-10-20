@@ -5,8 +5,12 @@ the alternatives were. Newest first.
 
 ## Index
 
-16 entries. Newest first.
+20 entries. Newest first.
 
+- [2026-10-20 — deployed_by hardening: deployer must exist, own-deployer only, prune-safe](#2026-10-20--deployed_by-hardening-deployer-must-exist-own-deployer-only-prune-safe)
+- [2026-10-20 — One writer per SA policy: sa_audit loses the same-org allowance, new deployed_by key](#2026-10-20--one-writer-per-sa-policy-sa_audit-loses-the-same-org-allowance-new-deployed_by-key)
+- [2026-10-20 — sa_audit is role-aware and runs on every Provision run](#2026-10-20--sa_audit-is-role-aware-and-runs-on-every-provision-run)
+- [2026-10-20 — `wif_subjects` (environment-scoped WIF link) and `sa_audit` (detect-only SA policy audit under `--prune`)](#2026-10-20--wif_subjects-environment-scoped-wif-link-and-sa_audit-detect-only-sa-policy-audit-under---prune)
 - [2026-10-19 — Local gate == CI: make ci, ci.yml calls the same targets, pre-push hook](#2026-10-19--local-gate--ci-make-ci-ciyml-calls-the-same-targets-pre-push-hook)
 - [2026-10-19 — CI pins actionlint and shellcheck](#2026-10-19--ci-pins-actionlint-and-shellcheck)
 - [2026-09-23 — `v1.7.0` cut on `a016dda`: capability expansion, a minor](#2026-09-23--v170-cut-on-a016dda-capability-expansion-a-minor)
@@ -23,6 +27,122 @@ the alternatives were. Newest first.
 - [2026-08-21 — caller inputs move to `env:`; CI grows actionlint and lints `action.yml` itself](#2026-08-21--caller-inputs-move-to-env-ci-grows-actionlint-and-lints-actionyml-itself)
 - [2026-08-20 — SHA-pin this repo's own actions and enforce it in CI](#2026-08-20--sha-pin-this-repos-own-actions-and-enforce-it-in-ci)
 - [2026-08-20 — port the two mutation-path engine fixes from the consumer; release v1.0.1](#2026-08-20--port-the-two-mutation-path-engine-fixes-from-the-consumer-release-v101)
+
+## 2026-10-20 — deployed_by hardening: deployer must exist, own-deployer only, prune-safe
+
+Follow-up to the entry above, from the W7 critic's review of the `deployed_by` work.
+
+**What changed in the engine.**
+- `ensure_act_as` describes each named deployer first; an absent one is a hard `sys.exit`
+  ("deployer X absent: run F6 (repos-sa) first") in BOTH dry-run and apply. Before, a dry-run printed
+  "would bind" while apply aborted mid-run on the nonexistent member and skipped every later handler.
+- `deployed_by` is valid only on an SA named `<d>-run` with no `wif_repos`/`wif_subjects`, and must be
+  exactly `[<d>-deployer]`. A shared JGD identity or another deployable's deployer can no longer be
+  granted actAs through it. The deployer id regex now carries the GCP 6-30 char bound.
+- `prune_act_as` adds the `deployed_by` pairs to `wanted`, so even a declared `*-deployer` SA cannot
+  make prune undo what ensure just added.
+
+**Why.** Rulings 14 (no cross-deployability) and 21 (one writer per SA policy): the key is the
+target-side spelling of one deployer-to-runtime pair, nothing wider. The regex lives only in the
+engine; the consumer's config test imports no engine code, so it keeps its own copy (noted there).
+
+## 2026-10-20 — One writer per SA policy: sa_audit loses the same-org allowance, new deployed_by key
+
+**What.** (1) `sa_audit` loses its same-org allowance: `_own_pool_same_org` and the branch that used
+it are deleted, so on a declared SA only the `(role, member)` pairs config declares pass. A repo link
+nobody declared (an own-pool principalSet or an environment subject of the same org) is UNDECLARED,
+whoever added it. (2) New key `deployed_by: [<deployable>-deployer]` on a runtime SA (the TARGET):
+`_declared_sa_grants` counts it, `ensure_act_as` binds each deployer as `roles/iam.serviceAccountUser`
+on that SA, `prune_act_as` leaves it alone (the member is not a declared SA), and an entry that does
+not match `<name>-deployer` stops the run ("deployed_by must be a non-empty list of ...").
+
+**Why (owner ruling 21, one writer per service-account policy; plan
+`infra-provisioning/plans/2026-10-20-repos-as-code-ownership-design.md` option A).** This supersedes
+the same-org allowance kept by the entry "sa_audit is role-aware and runs on every Provision run". That
+allowance existed so the project's F5 links on JGD-declared SAs would not be flagged. Under ruling 21
+the project never writes a JGD SA, so the reason is gone, and the allowance had become the hole: a
+project identity could link any same-org repo to `github-cleaner` (`artifactregistry.admin`) and the
+audit passed it. The key sits on the TARGET because the holder (`<d>-deployer`) is made by the project,
+not declared in JGD config, so `act_as` (declared on the holder) cannot express it.
+
+**Alternatives.** Keep the allowance but narrow it to `wif_repos` SAs: still lets a project add links
+to JGD SAs. A `deployed_by` on the deployer: the deployer is not a JGD SA. Rejected both.
+
+**repoAdmin pin.** Re-checked: `iam.serviceAccounts.setIamPolicy`/`getIamPolicy` are still needed,
+because F5 links and F6 manage the project-made deployers; `update` for F6's description rewrite;
+`run.services.create` for F7. Nothing in the pin is dropped; the narrowing is by name and by audit.
+
+**Release.** None yet; consumers (`infra-provisioning` `provision.yml`) stay on the old pin until the
+owner asks for a tag.
+
+## 2026-10-20 — sa_audit is role-aware and runs on every Provision run
+
+**What.** `sa_audit` (the detect-only audit of the IAM policy of every DECLARED service account) now
+(1) judges `(role, member)` pairs, not members, (2) knows SA-level `resource_roles.service_accounts`, and
+(3) runs on EVERY Provision run, dry-run included, as a `::warning::` report. It still FAILS the run only
+under `--prune`, and it never mutates in either mode (tests assert zero mutating calls in both).
+
+**Why (adversarial review, critic W3 B2/M1/M5).** The first version accepted any same-org WIF member
+whatever role it held. So the identity the audit exists to police could widen itself unseen:
+repo-admin binding `roles/iam.serviceAccountTokenCreator` on another SA to its own subject principal
+read as OK. It also passed a member of ANOTHER pool whose string merely contained the org, and an
+`act_as` holder or `principals:` member holding `roles/owner`. And a project declaring
+`resource_roles.service_accounts` failed every `--prune` run with a false UNDECLARED.
+
+**Rules now.** The declared set is built from config as `(role, member)` pairs: `wif_repos` principalSets
+and `wif_subjects` principals under `roles/iam.workloadIdentityUser`; `act_as` holders under
+`roles/iam.serviceAccountUser`; `resource_roles.service_accounts` and `principals[].resource_roles.service_accounts`
+under the roles they name. A pair not declared is UNDECLARED, except a member of THIS project's own pool
+(full `projects/<number>/.../workloadIdentityPools/<pool>/` prefix, not an org-name substring) whose repository
+is in the project's org holding `workloadIdentityUser`. An SA config links ONLY by `wif_subjects` gets no
+such leniency: a repo-wide principalSet (a link added to repo-admin) or another environment is UNDECLARED.
+*(The same-org exception is SUPERSEDED 2026-10-20 by "One writer per SA policy": it is deleted; only
+declared pairs pass on any declared SA.)*
+
+**Why report on every run.** The plan says "Provision reports". With the failure under `--prune` only and no
+schedule running `--prune`, detection was off unless a human remembered. The audit reads one policy per
+declared SA and mutates nothing, so it is safe on every run; a warning does not block a dry-run or apply.
+`--prune` keeps the failing variant (and now also fails when it examines zero SAs although some are declared:
+a check that cannot say how many items it examined is not evidence). Both print "examined N".
+
+**Also.** `tests/test_repo_links.py` was not in `make tests`; it is now.
+
+**Check.** `tests/test_repo_links.py` (role-aware cases, M1, both modes, zero-mutation) and
+`tests/test_engine.py` (the handler registry now lists `sa_audit`).
+
+## 2026-10-20 — `wif_subjects` (environment-scoped WIF link) and `sa_audit` (detect-only SA policy audit under `--prune`)
+
+**What.** Two additions to the service-account section of the engine. `wif_subjects: [{repo, environment}]`
+on an SA binds `roles/iam.workloadIdentityUser` for the single identity
+`principal://iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<pool>/subject/repo:<Org>/<repo>:environment:<env>`
+(idempotent, same shape as `wif_repos`). `sa_audit` is a detect-only audit of the IAM policy of every
+DECLARED service account; it runs under `--prune` beside the existing audits, reports each binding it
+does not recognise, never removes one, and fails the run.
+
+**Why `wif_subjects`.** `wif_repos` binds the repo-wide `principalSet` (`attribute.repository/<Org>/<repo>`),
+so a job on ANY branch or workflow of that repo may impersonate the SA. For an SA that can create
+service accounts and bind IAM on its own project, that is too wide: a pull-request branch could use it.
+The `principal://…/subject/repo:<Org>/<repo>:environment:<env>` member matches only a job that runs in
+that GitHub environment, so the environment's required reviewers and branch rule become the gate.
+It is a separate key, not a flag on `wif_repos`, so the two member shapes are never confused and an
+SA can hold either.
+
+**Why `sa_audit`.** A project's own admin identity may set IAM on its service accounts, so the identity
+that benefits from a grant can also widen it. Same reasoning as the provisioner-scope audit: an identity
+that can silently "fix" its own drift is not being policed, so this reports and fails and a human
+decides. *(Superseded in part by the entry "sa_audit is role-aware and runs on every Provision run"
+above: the member-only rule here was too lax and the audit is no longer `--prune`-only.)*
+
+**Why not remove what it finds.** The pruners remove only what this repo can prove it owns. A binding on
+an SA that nobody declared may be another subsystem's, or a break-glass grant; deleting it from a
+reconcile loop is the failure the conservative pruners exist to avoid.
+
+**Why only under `--prune`.** *(Superseded: it now also reports on every run; only the FAILURE stays
+under `--prune`. See the review-fix entry.)* It reads one policy per declared SA, and a failing audit
+blocks the run; `--prune` is already the destructive-adjacent path that humans run on purpose.
+
+**Check.** `tests/test_repo_links.py` and `tests/test_engine.py` cover the member shape, idempotence,
+and the audit's report-and-fail behaviour.
 
 ## 2026-10-19 — Local gate == CI: make ci, ci.yml calls the same targets, pre-push hook
 

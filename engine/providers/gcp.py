@@ -20,7 +20,9 @@ This module owns the `gcloud` seam (`gcloud` mutations / `gout` reads); the
 dry-run gate, fail-loud discipline, and printer live in `engine/core.py` (ADR-003).
 Tests stub `gcloud`/`gout` here (no GCP access needed).
 """
+import json
 import os
+import re
 import subprocess
 import sys
 
@@ -226,6 +228,20 @@ def ensure_wif(cfg, project):
                 do(["iam", "service-accounts", "add-iam-policy-binding", email, "--project", project,
                     "--role=roles/iam.workloadIdentityUser", f"--member={member}"],
                    project, f"  bind wif {repo} → {sa['name']}")
+        # Environment-scoped link: only a workflow job running in GitHub environment `env` of
+        # `repo` may impersonate. A single-identity `principal://…/subject/…` member
+        # (google.subject=assertion.sub), NEVER the repo-wide attribute.repository principalSet.
+        for link in sa.get("wif_subjects") or []:
+            repo, env = link["repo"], link["environment"]
+            email = sa_email(sa["name"], project)
+            member = (f"principal://iam.googleapis.com/projects/{num}/locations/global/"
+                      f"workloadIdentityPools/{pool}/subject/repo:{repo}:environment:{env}")
+            if sa_has_member(project, email, "roles/iam.workloadIdentityUser", member):
+                c("ok", f"  wif {repo}@{env} → {sa['name']}")
+            else:
+                do(["iam", "service-accounts", "add-iam-policy-binding", email, "--project", project,
+                    "--role=roles/iam.workloadIdentityUser", f"--member={member}"],
+                   project, f"  bind wif {repo}@{env} → {sa['name']}")
 
 
 def ensure_act_as(cfg, project):
@@ -233,10 +249,29 @@ def ensure_act_as(cfg, project):
     roles/iam.serviceAccountUser ON a runtime SA (target) so it may deploy/run-as it. This IS
     access — an impersonation grant — so the access broker owns it. Declared on the deployer as
     `act_as: [<target-sa-name>, ...]`; both SAs live in this project. Runs after
-    service_accounts so freshly-created targets already exist."""
+    service_accounts so freshly-created targets already exist.
+
+    The same grant, declared from the TARGET: `deployed_by: [<deployable>-deployer]` on a runtime
+    SA binds each listed deployer (an SA the PROJECT creates, so it is not a declared holder) as
+    serviceAccountUser on it. That is how JGD, the one writer of a runtime SA's policy, writes the
+    line the project's deploy needs."""
     print("act_as:")
     declared = False
     for sa in cfg.get("service_accounts", []):
+        for d in _deployed_by(sa):
+            declared = True
+            target, member = sa_email(sa["name"], project), f"serviceAccount:{sa_email(d, project)}"
+            # A bind naming a missing SA fails mid-apply (aborting every later handler) and a
+            # dry-run would only print "would bind": refuse in BOTH modes (F6 makes the deployers).
+            if not gout(["iam", "service-accounts", "describe", sa_email(d, project),
+                         "--format=value(email)"], project):
+                sys.exit(f"deployed_by: deployer {d} absent in {project}: run F6 (repos-sa) first")
+            if sa_has_member(project, target, "roles/iam.serviceAccountUser", member):
+                c("ok", f"deployed_by {d} → {sa['name']}")
+            else:
+                do(["iam", "service-accounts", "add-iam-policy-binding", target, "--project", project,
+                    "--role=roles/iam.serviceAccountUser", f"--member={member}"],
+                   project, f"bind deployed_by {d} → {sa['name']}")
         targets = sa.get("act_as") or []
         if not targets:
             continue
@@ -767,6 +802,143 @@ def _audit_scope_grants(email, scope, keep):
     return [f"undeclared role {r}" for r in extra]
 
 
+def _wif_base(cfg, project):
+    """`//iam.googleapis.com/projects/<n>/locations/global/workloadIdentityPools/<pool>/` for THIS
+    project's own pool, or None when no pool is configured. Compared as a whole prefix: an
+    org-name substring says nothing about WHICH pool (or project) a member comes from."""
+    pool = (cfg.get("wif") or {}).get("pool")
+    if not pool:
+        return None
+    num = str(cfg["project"].get("gcp_number") or
+              gout(["projects", "describe", project, "--format=value(projectNumber)"], project))
+    return f"//iam.googleapis.com/projects/{num}/locations/global/workloadIdentityPools/{pool}/"
+
+
+# GCP service-account ids are 6-30 chars: [a-z]([-a-z0-9]*[a-z0-9]).
+_DEPLOYER_RE = re.compile(r"^(?=.{6,30}$)[a-z][a-z0-9-]*[a-z0-9]-deployer$")
+
+
+def _deployed_by(sa):
+    """The deployers a runtime SA names in `deployed_by` — project-made `<deployable>-deployer`
+    SAs (owner ruling 21, one writer per SA policy). Refuses anything else: it is valid only on an
+    SA named `<d>-run` with no WIF links, and must be exactly [`<d>-deployer`], so a shared JGD
+    identity (or another deployable's deployer) can never be granted actAs through it."""
+    got = sa.get("deployed_by")
+    if got is None:
+        return []
+    name = sa.get("name") or ""
+    d = name[:-len("-run")] if name.endswith("-run") else None
+    if (not isinstance(got, list) or not d or sa.get("wif_repos") or sa.get("wif_subjects")
+            or got != [f"{d}-deployer"] or not _DEPLOYER_RE.match(got[0])):
+        sys.exit(f"service account {name!r}: deployed_by is valid only on a '<d>-run' SA with no "
+                 f"wif_repos/wif_subjects and must be exactly ['<d>-deployer'] "
+                 f"(a 6-30 char SA id), got {got!r}")
+    return got
+
+
+def _declared_sa_grants(cfg, project, base):
+    """{target SA name: {(role, member), ...}} — what config says each SA's own policy holds.
+    WIF links (`wif_repos` principalSets, `wif_subjects` principals) under workloadIdentityUser,
+    `act_as` holders and `deployed_by` deployers under serviceAccountUser, SA-level `resource_roles.service_accounts` and
+    `principals[].resource_roles.service_accounts` under the roles they name."""
+    wif_user, sa_user = "roles/iam.workloadIdentityUser", "roles/iam.serviceAccountUser"
+    sas = cfg.get("service_accounts") or []
+    out = {sa["name"]: set() for sa in sas}
+    for sa in sas:
+        got = out[sa["name"]]
+        for repo in sa.get("wif_repos") or []:
+            if base:
+                got.add((wif_user, f"principalSet:{base}attribute.repository/{repo}"))
+        for link in sa.get("wif_subjects") or []:
+            if base:
+                got.add((wif_user, f"principal:{base}subject/repo:{link['repo']}:environment:"
+                                   f"{link['environment']}"))
+        for d in _deployed_by(sa):                  # the TARGET lists its project-made deployers
+            got.add((sa_user, f"serviceAccount:{sa_email(d, project)}"))
+        holder = f"serviceAccount:{sa_email(sa['name'], project)}"
+        for target in sa.get("act_as") or []:
+            out.setdefault(target, set()).add((sa_user, holder))
+        for target, roles in ((sa.get("resource_roles") or {}).get("service_accounts") or {}).items():
+            for role in roles or []:
+                out.setdefault(target, set()).add((_qualify(role), holder))
+    for p in cfg.get("principals") or []:
+        member = (p or {}).get("member")
+        kinds = (p or {}).get("resource_roles") or {}
+        for target, roles in (kinds.get("service_accounts") or {}).items():
+            for role in roles or []:
+                out.setdefault(target, set()).add((_qualify(role), member))
+    return out
+
+
+def _sa_audit_findings(cfg, project):
+    """([finding, ...], examined) — reads one policy per declared SA; mutates nothing.
+
+    A (role, member) binding is expected only when config declares that exact pair (owner ruling
+    21: one writer per SA policy). There is no same-org allowance: a repo link nobody declared on a
+    declared SA is UNDECLARED, whoever added it."""
+    sas = cfg.get("service_accounts") or []
+    base = _wif_base(cfg, project)
+    declared = _declared_sa_grants(cfg, project, base)
+    findings, examined = [], 0
+    for sa in sas:
+        email = sa_email(sa["name"], project)
+        raw = gout(["iam", "service-accounts", "get-iam-policy", email, "--project", project,
+                    "--format=json"], project)
+        if not raw:
+            c("skip", f"{sa['name']}: no readable policy (SA absent?)")
+            continue
+        examined += 1
+        want = declared.get(sa["name"], set())
+        bad = []
+        for b in json.loads(raw).get("bindings") or []:
+            role = b.get("role")
+            for m in b.get("members") or []:
+                if (role, m) in want:
+                    continue
+                bad.append((role, m))
+        for role, m in bad:
+            c("err", f"UNDECLARED on {sa['name']}: {m} holds {role}")
+        findings += [f"{sa['name']}: {m} holds {role}" for role, m in bad]
+        if not bad:
+            c("ok", f"{sa['name']}: every binding is declared")
+    return findings, examined
+
+
+def _warn_findings(findings, examined, tail):
+    for f in findings:
+        print(f"::warning::sa_audit UNDECLARED {f}")
+    print(f"sa_audit: examined {examined} service account(s), {len(findings)} undeclared binding(s)"
+          + (f" — {tail}" if findings else ""))
+
+
+def report_service_accounts(cfg, project):
+    """DETECT drift on the IAM policy of every DECLARED service account, on EVERY Provision run
+    (dry-run and apply). Reports `::warning::` lines plus a summary; never fails the run, never
+    removes anything. The failing variant is `audit_service_accounts` (under --prune)."""
+    print("sa_audit:")
+    findings, examined = _sa_audit_findings(cfg, project)
+    _warn_findings(findings, examined, "a human reviews them; `--prune` fails on them")
+
+
+def audit_service_accounts(cfg, project):
+    """The `--prune` variant of `report_service_accounts`: same detect-only audit, but a finding
+    (or examining zero SAs when some are declared) fails the run. Never removes anything.
+
+    A project's repo-admin may bind IAM on its own SAs (ADR-010), so the identity that benefits
+    from the grant can also widen it. Like `_audit_scope_grants`, this reports and fails; a human
+    decides. A binding is a (role, member) pair; see `_sa_audit_findings` for what is expected."""
+    print("audit service_accounts:")
+    findings, examined = _sa_audit_findings(cfg, project)
+    _warn_findings(findings, examined, "not removed by design")
+    if findings:
+        c("err", "not removed by design — a binding is changed by a human, "
+                 "not by the identity that benefits from it")
+        sys.exit("service account audit FAILED, undeclared bindings: " + "; ".join(findings))
+    if cfg.get("service_accounts") and examined == 0:
+        sys.exit("service account audit examined 0 service accounts — nothing readable, "
+                 "so it proves nothing")
+
+
 def prune_provisioner(cfg, project):
     """Remove any PROJECT role on the provisioner SA that is not in
     bootstrap/provisioner-roles.txt (the shared kept-set). Safe: projectIamAdmin is kept,
@@ -806,6 +978,8 @@ def prune_act_as(cfg, project):
     owned = {sa_email(sa["name"], project) for sa in sas}
     wanted = set()
     for sa in sas:
+        for d in _deployed_by(sa):  # a declared pair: ensure_act_as adds it, so never prune it
+            wanted.add((sa_email(d, project), sa_email(sa["name"], project)))
         deployer = sa_email(sa["name"], project)
         for t in sa.get("act_as") or []:
             wanted.add((deployer, sa_email(t, project)))
@@ -832,7 +1006,12 @@ PRUNERS = {
     "resource_roles": prune_resource_roles,
     "principals": prune_principals,
     "provisioner": prune_provisioner,
+    "sa_audit": audit_service_accounts,
 }
+
+# Read-only and registered LAST (run order): reports on EVERY run, dry-run included, and never
+# fails or fixes. Under --prune the registry above runs instead and its variant FAILS on findings.
+HANDLERS["sa_audit"] = report_service_accounts
 
 
 # ── provider contract (used by the multi-target CLI loop, ADR-003 §5) ─────────
