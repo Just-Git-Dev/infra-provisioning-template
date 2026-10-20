@@ -106,9 +106,9 @@ def test_handlers_are_access_only():
     # `sa_audit` (2026-10-20) is read-only: it reports on every run and never mutates (the
     # scope line is unmoved; see DECISIONS 2026-10-20 and tests/test_repo_links.py).
     assert set(P.HANDLERS) == {"service_accounts", "act_as", "resource_roles", "principals",
-                               "wif", "sa_audit"}
+                               "wif", "sa_audit", "secret_audit"}
     assert set(P.PRUNERS) == {"service_accounts", "act_as", "resource_roles", "principals",
-                              "provisioner", "sa_audit"}
+                              "provisioner", "sa_audit", "secret_audit"}
 
 
 def test_handler_registry_includes_principals():
