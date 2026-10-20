@@ -20,6 +20,7 @@ This module owns the `gcloud` seam (`gcloud` mutations / `gout` reads); the
 dry-run gate, fail-loud discipline, and printer live in `engine/core.py` (ADR-003).
 Tests stub `gcloud`/`gout` here (no GCP access needed).
 """
+import json
 import os
 import subprocess
 import sys
@@ -226,6 +227,20 @@ def ensure_wif(cfg, project):
                 do(["iam", "service-accounts", "add-iam-policy-binding", email, "--project", project,
                     "--role=roles/iam.workloadIdentityUser", f"--member={member}"],
                    project, f"  bind wif {repo} → {sa['name']}")
+        # Environment-scoped link: only a workflow job running in GitHub environment `env` of
+        # `repo` may impersonate. A single-identity `principal://…/subject/…` member
+        # (google.subject=assertion.sub), NEVER the repo-wide attribute.repository principalSet.
+        for link in sa.get("wif_subjects") or []:
+            repo, env = link["repo"], link["environment"]
+            email = sa_email(sa["name"], project)
+            member = (f"principal://iam.googleapis.com/projects/{num}/locations/global/"
+                      f"workloadIdentityPools/{pool}/subject/repo:{repo}:environment:{env}")
+            if sa_has_member(project, email, "roles/iam.workloadIdentityUser", member):
+                c("ok", f"  wif {repo}@{env} → {sa['name']}")
+            else:
+                do(["iam", "service-accounts", "add-iam-policy-binding", email, "--project", project,
+                    "--role=roles/iam.workloadIdentityUser", f"--member={member}"],
+                   project, f"  bind wif {repo}@{env} → {sa['name']}")
 
 
 def ensure_act_as(cfg, project):
@@ -767,6 +782,49 @@ def _audit_scope_grants(email, scope, keep):
     return [f"undeclared role {r}" for r in extra]
 
 
+def _same_org_wif_member(member, org):
+    """A principalSet/principal of a pool whose repository is in `org`."""
+    return (member.startswith(("principalSet://", "principal://")) and
+            (f"/attribute.repository/{org}/" in member or f"/subject/repo:{org}/" in member))
+
+
+def audit_service_accounts(cfg, project):
+    """DETECT drift on the IAM policy of every DECLARED service account. Never removes anything.
+
+    A project's repo-admin may bind IAM on its own SAs (ADR-010), so the identity that benefits
+    from the grant can also widen it. Like `_audit_scope_grants`, this reports and fails; a human
+    decides. Allowed members: a same-org WIF principalSet/principal, an `act_as` holder declared
+    for this SA, or a `principals:` member. Anything else is UNDECLARED.
+    """
+    print("audit service_accounts:")
+    org = cfg["project"]["github_org"]
+    sas = cfg.get("service_accounts") or []
+    principals = {(p or {}).get("member") for p in cfg.get("principals") or []}
+    problems, examined = [], 0
+    for sa in sas:
+        email = sa_email(sa["name"], project)
+        raw = gout(["iam", "service-accounts", "get-iam-policy", email, "--project", project,
+                    "--format=json"], project)
+        if not raw:
+            c("skip", f"{sa['name']}: no readable policy (SA absent?)")
+            continue
+        examined += 1
+        declared = {f"serviceAccount:{sa_email(o['name'], project)}"
+                    for o in sas if sa["name"] in (o.get("act_as") or [])} | principals
+        bad = [(b.get("role"), m) for b in (json.loads(raw).get("bindings") or [])
+               for m in b.get("members") or []
+               if m not in declared and not _same_org_wif_member(m, org)]
+        for role, m in bad:
+            c("err", f"UNDECLARED on {sa['name']}: {m} holds {role}")
+        problems += [f"{sa['name']}: {m} holds {role}" for role, m in bad]
+        if not bad:
+            c("ok", f"{sa['name']}: every binding is same-org or declared")
+    if problems:
+        c("err", "not removed by design — a binding is changed by a human, "
+                 "not by the identity that benefits from it")
+        sys.exit("service account audit FAILED, undeclared bindings: " + "; ".join(problems))
+
+
 def prune_provisioner(cfg, project):
     """Remove any PROJECT role on the provisioner SA that is not in
     bootstrap/provisioner-roles.txt (the shared kept-set). Safe: projectIamAdmin is kept,
@@ -832,6 +890,7 @@ PRUNERS = {
     "resource_roles": prune_resource_roles,
     "principals": prune_principals,
     "provisioner": prune_provisioner,
+    "sa_audit": audit_service_accounts,
 }
 
 

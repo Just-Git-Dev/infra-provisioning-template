@@ -42,6 +42,15 @@ targets:
         roles: [artifactregistry.writer, run.developer]   # access the app-repo workflow needs
         wif_repos: [YourOrg/api]                           # repos allowed to impersonate this SA
         act_as: [your-app-run]                             # may deploy/run-as this runtime SA
+      - name: repo-admin
+        description: "Project repo's own admin identity — creates SAs/services (owner: platform)"
+        # wif_subjects: an ENVIRONMENT-scoped link. Binds the single-identity member
+        #   principal://…/subject/repo:<Org>/<repo>:environment:<env>
+        # so only a job running in that GitHub environment may impersonate — never the repo-wide
+        # principalSet that `wif_repos` binds. Idempotent. `--prune` also runs `sa_audit`, which
+        # REPORTS (never removes) any binding on a declared SA that is not a same-org WIF
+        # principal or a declared act_as/principals grant, and fails the run.
+        wif_subjects: [{repo: YourOrg/project, environment: repo-admin}]
       - name: ci-rotator
         description: "CI ops — rolls the service, rotates its secret (owner: platform)"
         roles: [run.admin]                                 # project-scope: needed everywhere

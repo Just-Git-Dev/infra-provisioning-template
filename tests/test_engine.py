@@ -106,7 +106,7 @@ def test_handlers_are_access_only():
     assert set(P.HANDLERS) == {"service_accounts", "act_as", "resource_roles", "principals",
                                "wif"}
     assert set(P.PRUNERS) == {"service_accounts", "act_as", "resource_roles", "principals",
-                              "provisioner"}
+                              "provisioner", "sa_audit"}
 
 
 def test_handler_registry_includes_principals():
