@@ -39,7 +39,12 @@ which pins a **full commit SHA**, not `@v1`.
   SAs. `sa_audit` therefore has no same-org allowance: on a declared SA only declared
   `(role, member)` pairs pass. A runtime SA names its project-made deployers with
   `deployed_by: [<d>-deployer]` (entries must end `-deployer`; `ensure_act_as` binds them as
-  `serviceAccountUser`, `prune_act_as` never removes them).
+  `serviceAccountUser`, `prune_act_as` never removes them). A Google-managed service agent is
+  DECLARED (not written, phase 1) with `service_agents: [pubsub]` on a `<d>-run` SA: the allowlist
+  `SERVICE_AGENTS` in `providers/gcp.py` maps each name to its agent domain and FIXED role(s)
+  (`pubsub` -> `gcp-sa-pubsub` -> `serviceAccountTokenCreator`); the member is derived from the
+  project number (read-only `gcloud projects describe`, fails loudly). Widening the allowlist is a
+  decision, not a commit.
 - **`principals` is the one block whose member is a HUMAN.** Top-level (not under an SA), kind
   `service_accounts` only, and the role must be in `bootstrap/principal-grantable-roles.txt`.
   IAM does not gate it — `modifiedGrantsByRole` covers project/folder/org policies, not SA

@@ -258,6 +258,7 @@ def ensure_act_as(cfg, project):
     print("act_as:")
     declared = False
     for sa in cfg.get("service_accounts", []):
+        _service_agents(sa, project)    # validate at plan time; phase 1 never writes the agent
         for d in _deployed_by(sa):
             declared = True
             target, member = sa_email(sa["name"], project), f"serviceAccount:{sa_email(d, project)}"
@@ -836,10 +837,57 @@ def _deployed_by(sa):
     return got
 
 
+# Google-managed service agents a runtime SA may DECLARE (phase 1 is declare-only: sa_audit stops
+# flagging the pair; nothing is written). short name -> (agent domain label, FIXED roles). Adding an
+# entry is a decision, not a commit: it blesses a Google-owned identity on a runtime SA's policy.
+SERVICE_AGENTS = {
+    # Pub/Sub push with OIDC auth: the agent must mint tokens for the push-auth SA
+    # https://cloud.google.com/pubsub/docs/authenticate-push-subscriptions
+    "pubsub": ("gcp-sa-pubsub", ["roles/iam.serviceAccountTokenCreator"]),
+}
+
+_PROJECT_NUMBERS = {}   # project id -> number; one read-only describe per run
+
+
+def _project_number(project):
+    """The project's number via a read-only describe, cached. Fails loudly: a service-agent member
+    built from a guessed number would be a wrong identity, so there is no fallback."""
+    if project not in _PROJECT_NUMBERS:
+        num = (gout(["projects", "describe", project, "--format=value(projectNumber)"], project)
+               or "").strip()
+        if not num.isdigit():
+            sys.exit(f"service_agents: cannot read the project number of {project!r} "
+                     f"(got {num!r}); refusing to guess a service-agent member")
+        _PROJECT_NUMBERS[project] = num
+    return _PROJECT_NUMBERS[project]
+
+
+def _service_agents(sa, project):
+    """[(role, member), ...] for the Google service agents a runtime SA declares in
+    `service_agents: [pubsub]`. Valid only on an SA named `<d>-run` (the `deployed_by` rule), as a
+    list of names in SERVICE_AGENTS; anything else fails at plan time. The project number is read
+    only when an agent is actually declared."""
+    got = sa.get("service_agents")
+    if got is None:
+        return []
+    name = sa.get("name") or ""
+    if not name.endswith("-run") or len(name) == len("-run"):
+        sys.exit(f"service account {name!r}: service_agents is valid only on a '<d>-run' SA")
+    if not isinstance(got, list) or not got or any(g not in SERVICE_AGENTS for g in got):
+        sys.exit(f"service account {name!r}: service_agents must be a non-empty list of "
+                 f"{sorted(SERVICE_AGENTS)}, got {got!r}")
+    num, out = _project_number(project), []
+    for g in got:
+        domain, roles = SERVICE_AGENTS[g]
+        out += [(r, f"serviceAccount:service-{num}@{domain}.iam.gserviceaccount.com") for r in roles]
+    return out
+
+
 def _declared_sa_grants(cfg, project, base):
     """{target SA name: {(role, member), ...}} — what config says each SA's own policy holds.
     WIF links (`wif_repos` principalSets, `wif_subjects` principals) under workloadIdentityUser,
-    `act_as` holders and `deployed_by` deployers under serviceAccountUser, SA-level `resource_roles.service_accounts` and
+    `act_as` holders and `deployed_by` deployers under serviceAccountUser, `service_agents`
+    (Google-managed agents, fixed roles from SERVICE_AGENTS), SA-level `resource_roles.service_accounts` and
     `principals[].resource_roles.service_accounts` under the roles they name."""
     wif_user, sa_user = "roles/iam.workloadIdentityUser", "roles/iam.serviceAccountUser"
     sas = cfg.get("service_accounts") or []
@@ -855,6 +903,7 @@ def _declared_sa_grants(cfg, project, base):
                                    f"{link['environment']}"))
         for d in _deployed_by(sa):                  # the TARGET lists its project-made deployers
             got.add((sa_user, f"serviceAccount:{sa_email(d, project)}"))
+        got.update(_service_agents(sa, project))    # declare-only: ensure never writes these
         holder = f"serviceAccount:{sa_email(sa['name'], project)}"
         for target in sa.get("act_as") or []:
             out.setdefault(target, set()).add((sa_user, holder))
@@ -977,6 +1026,7 @@ def prune_act_as(cfg, project):
     sas = cfg.get("service_accounts", [])
     owned = {sa_email(sa["name"], project) for sa in sas}
     wanted = set()
+    # `service_agents` members are Google-managed (never in `owned`), so this pass never touches them.
     for sa in sas:
         for d in _deployed_by(sa):  # a declared pair: ensure_act_as adds it, so never prune it
             wanted.add((sa_email(d, project), sa_email(sa["name"], project)))
