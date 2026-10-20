@@ -261,6 +261,11 @@ def ensure_act_as(cfg, project):
         for d in _deployed_by(sa):
             declared = True
             target, member = sa_email(sa["name"], project), f"serviceAccount:{sa_email(d, project)}"
+            # A bind naming a missing SA fails mid-apply (aborting every later handler) and a
+            # dry-run would only print "would bind": refuse in BOTH modes (F6 makes the deployers).
+            if not gout(["iam", "service-accounts", "describe", sa_email(d, project),
+                         "--format=value(email)"], project):
+                sys.exit(f"deployed_by: deployer {d} absent in {project}: run F6 (repos-sa) first")
             if sa_has_member(project, target, "roles/iam.serviceAccountUser", member):
                 c("ok", f"deployed_by {d} → {sa['name']}")
             else:
@@ -809,20 +814,25 @@ def _wif_base(cfg, project):
     return f"//iam.googleapis.com/projects/{num}/locations/global/workloadIdentityPools/{pool}/"
 
 
-_DEPLOYER_RE = re.compile(r"^[a-z][a-z0-9-]*-deployer$")
+# GCP service-account ids are 6-30 chars: [a-z]([-a-z0-9]*[a-z0-9]).
+_DEPLOYER_RE = re.compile(r"^(?=.{6,30}$)[a-z][a-z0-9-]*[a-z0-9]-deployer$")
 
 
 def _deployed_by(sa):
     """The deployers a runtime SA names in `deployed_by` — project-made `<deployable>-deployer`
-    SAs (owner ruling 21, one writer per SA policy). Refuses anything else: the suffix is how each
-    side knows who writes which SA, so a shared JGD identity can never be named here."""
+    SAs (owner ruling 21, one writer per SA policy). Refuses anything else: it is valid only on an
+    SA named `<d>-run` with no WIF links, and must be exactly [`<d>-deployer`], so a shared JGD
+    identity (or another deployable's deployer) can never be granted actAs through it."""
     got = sa.get("deployed_by")
     if got is None:
         return []
-    if not isinstance(got, list) or not got or not all(
-            isinstance(d, str) and _DEPLOYER_RE.match(d) for d in got):
-        sys.exit(f"service account {sa.get('name')!r}: deployed_by must be a non-empty list of "
-                 f"'<deployable>-deployer' names, got {got!r}")
+    name = sa.get("name") or ""
+    d = name[:-len("-run")] if name.endswith("-run") else None
+    if (not isinstance(got, list) or not d or sa.get("wif_repos") or sa.get("wif_subjects")
+            or got != [f"{d}-deployer"] or not _DEPLOYER_RE.match(got[0])):
+        sys.exit(f"service account {name!r}: deployed_by is valid only on a '<d>-run' SA with no "
+                 f"wif_repos/wif_subjects and must be exactly ['<d>-deployer'] "
+                 f"(a 6-30 char SA id), got {got!r}")
     return got
 
 
@@ -968,7 +978,8 @@ def prune_act_as(cfg, project):
     owned = {sa_email(sa["name"], project) for sa in sas}
     wanted = set()
     for sa in sas:
-        _deployed_by(sa)            # validate; a deployer is not an owned SA, so it is never pruned
+        for d in _deployed_by(sa):  # a declared pair: ensure_act_as adds it, so never prune it
+            wanted.add((sa_email(d, project), sa_email(sa["name"], project)))
         deployer = sa_email(sa["name"], project)
         for t in sa.get("act_as") or []:
             wanted.add((deployer, sa_email(t, project)))

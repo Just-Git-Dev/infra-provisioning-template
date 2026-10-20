@@ -5,8 +5,9 @@ the alternatives were. Newest first.
 
 ## Index
 
-19 entries. Newest first.
+20 entries. Newest first.
 
+- [2026-10-20 — deployed_by hardening: deployer must exist, own-deployer only, prune-safe](#2026-10-20--deployed_by-hardening-deployer-must-exist-own-deployer-only-prune-safe)
 - [2026-10-20 — One writer per SA policy: sa_audit loses the same-org allowance, new deployed_by key](#2026-10-20--one-writer-per-sa-policy-sa_audit-loses-the-same-org-allowance-new-deployed_by-key)
 - [2026-10-20 — sa_audit is role-aware and runs on every Provision run](#2026-10-20--sa_audit-is-role-aware-and-runs-on-every-provision-run)
 - [2026-10-20 — `wif_subjects` (environment-scoped WIF link) and `sa_audit` (detect-only SA policy audit under `--prune`)](#2026-10-20--wif_subjects-environment-scoped-wif-link-and-sa_audit-detect-only-sa-policy-audit-under---prune)
@@ -26,6 +27,24 @@ the alternatives were. Newest first.
 - [2026-08-21 — caller inputs move to `env:`; CI grows actionlint and lints `action.yml` itself](#2026-08-21--caller-inputs-move-to-env-ci-grows-actionlint-and-lints-actionyml-itself)
 - [2026-08-20 — SHA-pin this repo's own actions and enforce it in CI](#2026-08-20--sha-pin-this-repos-own-actions-and-enforce-it-in-ci)
 - [2026-08-20 — port the two mutation-path engine fixes from the consumer; release v1.0.1](#2026-08-20--port-the-two-mutation-path-engine-fixes-from-the-consumer-release-v101)
+
+## 2026-10-20 — deployed_by hardening: deployer must exist, own-deployer only, prune-safe
+
+Follow-up to the entry above, from the W7 critic's review of the `deployed_by` work.
+
+**What changed in the engine.**
+- `ensure_act_as` describes each named deployer first; an absent one is a hard `sys.exit`
+  ("deployer X absent: run F6 (repos-sa) first") in BOTH dry-run and apply. Before, a dry-run printed
+  "would bind" while apply aborted mid-run on the nonexistent member and skipped every later handler.
+- `deployed_by` is valid only on an SA named `<d>-run` with no `wif_repos`/`wif_subjects`, and must be
+  exactly `[<d>-deployer]`. A shared JGD identity or another deployable's deployer can no longer be
+  granted actAs through it. The deployer id regex now carries the GCP 6-30 char bound.
+- `prune_act_as` adds the `deployed_by` pairs to `wanted`, so even a declared `*-deployer` SA cannot
+  make prune undo what ensure just added.
+
+**Why.** Rulings 14 (no cross-deployability) and 21 (one writer per SA policy): the key is the
+target-side spelling of one deployer-to-runtime pair, nothing wider. The regex lives only in the
+engine; the consumer's config test imports no engine code, so it keeps its own copy (noted there).
 
 ## 2026-10-20 — One writer per SA policy: sa_audit loses the same-org allowance, new deployed_by key
 

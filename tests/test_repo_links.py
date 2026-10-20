@@ -196,7 +196,7 @@ def test_audit_exists_and_is_run_by_provision():
     assert P.audit_service_accounts in P.PRUNERS.values() or P.audit_service_accounts in P.HANDLERS.values()
 
 
-def test_audit_is_clean_for_same_org_links_and_declared_grants():
+def test_audit_is_clean_for_declared_links_and_grants():
     reads = _policy_reads({
         ROLE_WIF: [SAME_ORG_SET, ENV_MEMBER],
         "roles/iam.serviceAccountUser": [DECLARED_ACTOR]})
@@ -292,7 +292,7 @@ def test_audit_flags_repo_admin_subject_holding_tokencreator_on_another_sa():
     assert not _flagged(out, "payments-api"), f"declared repo link flagged:\n{out}"
 
 
-def test_audit_same_org_wif_member_is_allowed_only_with_workload_identity_user():
+def test_audit_flags_a_same_org_wif_member_on_a_wif_less_sa_under_any_role():
     reads = _reads_for({"deployer": {ROLE_SAUSER: [SAME_ORG_SET], "roles/owner": [SAME_ORG_SET]}})
     rec, out, exit_msg = _run(P.audit_service_accounts, _role_cfg(), reads)
     assert exit_msg and "undeclared" in exit_msg.lower(), (exit_msg, out)
@@ -460,23 +460,44 @@ def test_audit_never_removes_anything_without_prune_and_stays_detect_only_with_i
     assert exit_msg and rec.calls == [], (exit_msg, rec.calls)
 
 
-def test_ensure_act_as_binds_each_deployed_by_deployer_on_the_target():
-    cfg = _owned_cfg()
-    cfg["service_accounts"][-1]["deployed_by"] = ["api-deployer", "api2-deployer"]
-    rec, out, exit_msg = _run(P.ensure_act_as, cfg, lambda a: "")
+def _deployer_reads(present, sa_user_for=()):
+    """Reads where `iam service-accounts describe <sa>` answers only for SAs in `present`, and an
+    SA's own policy already holds serviceAccountUser for the SAs named in `sa_user_for`."""
+    def reads(args):
+        j = " ".join(args)
+        if args[:3] == ["iam", "service-accounts", "describe"]:
+            return next((n for n in present if f"{n}@p." in j), "")
+        if "get-iam-policy" in j and "api-run@" in j:
+            return "roles/iam.serviceAccountUser" if sa_user_for else ""
+        return ""
+    return reads
+
+
+def test_ensure_act_as_binds_the_deployed_by_deployer_on_the_target():
+    rec, out, exit_msg = _run(P.ensure_act_as, _owned_cfg(), _deployer_reads(["api-deployer"]))
     assert exit_msg is None, exit_msg
     adds = [c for c in rec.calls if "add-iam-policy-binding" in c and "api-run@p.iam.gserviceaccount.com" in c]
-    members = {next(a for a in c if a.startswith("--member=")) for c in adds}
-    assert members == {"--member=serviceAccount:api-deployer@p.iam.gserviceaccount.com",
-                       "--member=serviceAccount:api2-deployer@p.iam.gserviceaccount.com"}, adds
-    assert all("--role=roles/iam.serviceAccountUser" in c for c in adds), adds
+    assert len(adds) == 1 and "--member=" + DEPLOYER_MEMBER in adds[0], adds
+    assert "--role=roles/iam.serviceAccountUser" in adds[0], adds
 
 
 def test_ensure_act_as_deployed_by_is_idempotent_and_counts_as_declared():
-    reads = lambda a: "roles/iam.serviceAccountUser" if "api-run@" in " ".join(a) else ""
     rec, out, exit_msg = _run(P.ensure_act_as, {"service_accounts": [
-        {"name": "api-run", "deployed_by": ["api-deployer"]}]}, reads)
+        {"name": "api-run", "deployed_by": ["api-deployer"]}]},
+        _deployer_reads(["api-deployer"], sa_user_for=["api-deployer"]))
     assert exit_msg is None and rec.calls == [] and "no act_as declared" not in out, (exit_msg, rec.calls, out)
+
+
+def test_ensure_act_as_fails_loudly_when_the_deployer_is_absent_in_dry_run_and_apply():
+    # spec section 7: F6 creates the deployers BEFORE the JGD PR that declares deployed_by applies.
+    # A bind naming a missing SA would sys.exit mid-apply and abort every later handler, and a
+    # dry-run would just print "would bind" -- so BOTH modes refuse up front.
+    for dry in (True, False):
+        rec, out, exit_msg = _run_mode(P.ensure_act_as, {"service_accounts": [
+            {"name": "api-run", "deployed_by": ["api-deployer"]}]}, _deployer_reads([]), dry)
+        assert exit_msg and "deployer api-deployer absent" in exit_msg and "run F6 (repos-sa) first" in exit_msg, \
+            (dry, exit_msg, out)
+        assert not any("add-iam-policy-binding" in c for c in rec.calls), (dry, rec.calls)
 
 
 def test_deployed_by_entries_must_end_in_deployer():
@@ -487,6 +508,32 @@ def test_deployed_by_entries_must_end_in_deployer():
             assert exit_msg and "deployed_by" in exit_msg, (fn.__name__, bad, exit_msg, out)
 
 
+def test_deployed_by_is_only_valid_on_a_run_sa_naming_exactly_its_own_deployer():
+    bad_cfgs = [
+        {"name": "github-cleaner", "deployed_by": ["api-deployer"]},           # not a <d>-run SA
+        {"name": "api-run", "deployed_by": ["web-deployer"]},                  # another deployable's deployer
+        {"name": "api-run", "deployed_by": ["api-deployer", "web-deployer"]},  # extra entry
+        {"name": "api-run", "deployed_by": ["api-deployer"], "wif_repos": ["Example-Org/x"]},
+        {"name": "api-run", "deployed_by": ["api-deployer"], "wif_subjects": [{"repo": "x", "env": "y"}]},
+        {"name": "-run", "deployed_by": ["-deployer"]},
+    ]
+    for sa in bad_cfgs:
+        for fn in (P.ensure_act_as, P.prune_act_as, P.audit_service_accounts):
+            rec, out, exit_msg = _run(fn, {"service_accounts": [sa]}, _deployer_reads(["api-deployer"]))
+            assert exit_msg and "deployed_by" in exit_msg, (fn.__name__, sa, exit_msg, out)
+
+
+def test_deployed_by_deployer_id_must_fit_the_gcp_30_char_limit():
+    d = "a" * 22                                    # '<d>-deployer' is 31 chars
+    cfg = {"service_accounts": [{"name": f"{d}-run", "deployed_by": [f"{d}-deployer"]}]}
+    rec, out, exit_msg = _run(P.ensure_act_as, cfg, _deployer_reads([f"{d}-deployer"]))
+    assert exit_msg and "deployed_by" in exit_msg, (exit_msg, out)
+    b = "b" * 10
+    rec, out, exit_msg = _run(P.ensure_act_as, {"service_accounts": [
+        {"name": f"{b}-run", "deployed_by": [f"{b}-deployer"]}]}, _deployer_reads([f"{b}-deployer"]))
+    assert exit_msg is None, exit_msg
+
+
 def test_prune_act_as_leaves_deployed_by_members_alone():
     cfg = {"service_accounts": [{"name": "api-run", "deployed_by": ["api-deployer"]}]}
     reads = lambda a: (DEPLOYER_MEMBER if "api-run@" in " ".join(a) else "")
@@ -494,8 +541,19 @@ def test_prune_act_as_leaves_deployed_by_members_alone():
     assert exit_msg is None and rec.calls == [], (exit_msg, rec.calls, out)
 
 
+def test_prune_act_as_keeps_a_deployed_by_pair_even_when_the_deployer_is_a_declared_sa():
+    # flip-flop guard: if the deployer is ALSO a declared SA it counts as owned, so prune would
+    # remove what ensure_act_as just added unless deployed_by pairs are in `wanted`.
+    cfg = {"service_accounts": [{"name": "api-run", "deployed_by": ["api-deployer"]},
+                                {"name": "api-deployer"}]}
+    reads = lambda a: (DEPLOYER_MEMBER if "api-run@" in " ".join(a) else "")
+    rec, out, exit_msg = _run(P.prune_act_as, cfg, reads)
+    assert exit_msg is None and not any("remove-iam-policy-binding" in c for c in rec.calls), \
+        (exit_msg, rec.calls, out)
+
+
 if __name__ == "__main__":
-    fns =[v for k, v in sorted(globals().items()) if k.startswith("test_")]
+    fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0
     for fn in fns:
         try:
