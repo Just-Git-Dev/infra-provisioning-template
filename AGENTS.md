@@ -51,7 +51,7 @@ which pins a **full commit SHA**, not `@v1`.
   `viewer` (a missing line, an extra member or role, any IAM condition). The expectation is derived
   from the JGD config alone, never from the repos register. It never mutates, prints
   `examined N secret(s)`, treats an absent secret as `info` (not examined), and its `--prune`
-  variant fails on a finding or on zero examined when a `deployed_by` exists. Run it alone with
+  variant fails on a finding only (all absent prints the absent count, exit 0). Run it alone with
   `--only secret_audit`; the secret's policy has one writer, the project's `repos-secrets`.
 - **`principals` is the one block whose member is a HUMAN.** Top-level (not under an SA), kind
   `service_accounts` only, and the role must be in `bootstrap/principal-grantable-roles.txt`.

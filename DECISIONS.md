@@ -44,8 +44,9 @@ works and the daily sa-audit workflow can add it later. It prints `examined N se
 
 **Detect-only contract.** It issues no mutating gcloud call, ever: no add/remove binding, no
 set-iam-policy, no create. A secret that does not exist is `info` (the service may have no secret yet)
-and is not counted as examined. The failing variant also fails when some `deployed_by` exists but it
-examined zero secrets, because a check that cannot say how many items it examined is not evidence.
+and is not counted as examined. The failing variant fails on a finding only (devops ruling 2026-10-20, superseding the earlier
+"fail on zero examined"): it still states what it examined, `examined 0 secret(s) (N absent: not
+adopted yet)`, and exits 0; an unreadable secret already fails loudly in `gout`.
 
 **Why.** Owner ruling 24 (design `plans/2026-10-20-repos-as-code-secrets-design.md` in
 infra-provisioning, section 8): a `<d>-env` secret's policy has one writer, the project's
