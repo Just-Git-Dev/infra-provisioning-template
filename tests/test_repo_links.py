@@ -172,7 +172,9 @@ DECLARED_ACTOR = "serviceAccount:deployer@p.iam.gserviceaccount.com"
 
 
 def _audit_cfg():
-    return _cfg([{"name": "svc-a"},
+    # svc-a declares the links the audit tests treat as expected (ruling 21: no same-org allowance)
+    return _cfg([{"name": "svc-a", "wif_repos": ["Example-Org/payments-api"],
+                  "wif_subjects": [{"repo": "Example-Org/project", "environment": "repo-admin"}]},
                  {"name": "deployer", "act_as": ["svc-a"]}])
 
 
@@ -318,7 +320,7 @@ def test_audit_flags_members_of_another_pool_or_project_even_with_the_same_org()
                   "workloadIdentityPools/other-pool/attribute.repository/Example-Org/payments-api")
     other_proj = ("principalSet://iam.googleapis.com/projects/999/locations/global/"
                   f"workloadIdentityPools/{POOL}/attribute.repository/Example-Org/payments-api")
-    reads = _reads_for({"deployer": {ROLE_WIF: [SAME_ORG_SET, other_pool, other_proj]}})
+    reads = _reads_for({"github-rotator": {ROLE_WIF: [SAME_ORG_SET, other_pool, other_proj]}})
     rec, out, exit_msg = _run(P.audit_service_accounts, _role_cfg(), reads)
     assert exit_msg and "undeclared" in exit_msg.lower(), (exit_msg, out)
     assert _flagged(out, "other-pool") and _flagged(out, "projects/999"), out
@@ -409,8 +411,91 @@ def test_audit_fails_when_it_examines_zero_service_accounts():
     assert exit_msg and "examined 0" in exit_msg, (exit_msg, out)
 
 
+# ── (i) one writer per SA policy (owner ruling 21): no same-org allowance, `deployed_by` ──────
+DEPLOYER_MEMBER = "serviceAccount:api-deployer@p.iam.gserviceaccount.com"
+
+
+def _owned_cfg():
+    """A wif_repos SA (github-rotator), plus a runtime SA that names its project-made deployer."""
+    cfg = _role_cfg()
+    cfg["service_accounts"].append({"name": "api-run", "deployed_by": ["api-deployer"]})
+    return cfg
+
+
+def test_audit_flags_an_own_pool_principalset_not_declared_on_a_wif_repos_sa():
+    # ruling 21: the same-org allowance is gone. payments-api IS declared on github-rotator; another
+    # repo of the same org (and an env subject) is not, whoever added it.
+    extra_set = f"principalSet:{POOLBASE}/attribute.repository/Example-Org/other-repo"
+    extra_env = f"principal:{POOLBASE}/subject/repo:Example-Org/other-repo:environment:prod"
+    reads = _reads_for({"github-rotator": {ROLE_WIF: [
+        f"principalSet:{POOLBASE}/attribute.repository/Example-Org/payments-api",
+        extra_set, extra_env]}})
+    rec, out, exit_msg = _run(P.audit_service_accounts, _role_cfg(), reads)
+    assert exit_msg and "undeclared" in exit_msg.lower(), (exit_msg, out)
+    assert _flagged(out, "other-repo:environment:prod") and _flagged(out, "attribute.repository/Example-Org/other-repo"), out
+    assert not _flagged(out, "payments-api"), f"the declared link was flagged:\n{out}"
+    assert _n_flagged(out) == 2, out
+    assert not hasattr(P, "_own_pool_same_org"), "the same-org helper must be deleted"
+
+
+def test_audit_deployed_by_member_is_declared_for_service_account_user_only():
+    ok = _reads_for({"api-run": {ROLE_SAUSER: [DEPLOYER_MEMBER]}})
+    rec, out, exit_msg = _run(P.audit_service_accounts, _owned_cfg(), ok)
+    assert exit_msg is None, f"a deployed_by member was flagged: {exit_msg}\n{out}"
+    bad = _reads_for({"api-run": {ROLE_SAUSER: [DEPLOYER_MEMBER], "roles/owner": [DEPLOYER_MEMBER]}})
+    rec, out, exit_msg = _run(P.audit_service_accounts, _owned_cfg(), bad)
+    assert exit_msg and _n_flagged(out) == 1 and "roles/owner" in out, (exit_msg, out)
+    other = _reads_for({"api-run": {ROLE_SAUSER: [DEPLOYER_MEMBER,
+                                                  "serviceAccount:web-deployer@p.iam.gserviceaccount.com"]}})
+    rec, out, exit_msg = _run(P.audit_service_accounts, _owned_cfg(), other)
+    assert exit_msg and _flagged(out, "web-deployer@p."), (exit_msg, out)
+
+
+def test_audit_never_removes_anything_without_prune_and_stays_detect_only_with_it():
+    reads = _reads_for({"github-rotator": {ROLE_WIF: [
+        f"principalSet:{POOLBASE}/attribute.repository/Example-Org/other-repo"]}})
+    rec, out, exit_msg = _run_mode(P.HANDLERS["sa_audit"], _role_cfg(), reads, False)
+    assert exit_msg is None and rec.calls == [] and "1 undeclared" in out, (exit_msg, rec.calls, out)
+    rec, out, exit_msg = _run_mode(P.PRUNERS["sa_audit"], _role_cfg(), reads, False)
+    assert exit_msg and rec.calls == [], (exit_msg, rec.calls)
+
+
+def test_ensure_act_as_binds_each_deployed_by_deployer_on_the_target():
+    cfg = _owned_cfg()
+    cfg["service_accounts"][-1]["deployed_by"] = ["api-deployer", "api2-deployer"]
+    rec, out, exit_msg = _run(P.ensure_act_as, cfg, lambda a: "")
+    assert exit_msg is None, exit_msg
+    adds = [c for c in rec.calls if "add-iam-policy-binding" in c and "api-run@p.iam.gserviceaccount.com" in c]
+    members = {next(a for a in c if a.startswith("--member=")) for c in adds}
+    assert members == {"--member=serviceAccount:api-deployer@p.iam.gserviceaccount.com",
+                       "--member=serviceAccount:api2-deployer@p.iam.gserviceaccount.com"}, adds
+    assert all("--role=roles/iam.serviceAccountUser" in c for c in adds), adds
+
+
+def test_ensure_act_as_deployed_by_is_idempotent_and_counts_as_declared():
+    reads = lambda a: "roles/iam.serviceAccountUser" if "api-run@" in " ".join(a) else ""
+    rec, out, exit_msg = _run(P.ensure_act_as, {"service_accounts": [
+        {"name": "api-run", "deployed_by": ["api-deployer"]}]}, reads)
+    assert exit_msg is None and rec.calls == [] and "no act_as declared" not in out, (exit_msg, rec.calls, out)
+
+
+def test_deployed_by_entries_must_end_in_deployer():
+    for bad in (["github-releaser"], ["api-run"], "api-deployer", ["API-deployer"], [""]):
+        cfg = {"service_accounts": [{"name": "api-run", "deployed_by": bad}]}
+        for fn in (P.ensure_act_as, P.prune_act_as, P.audit_service_accounts):
+            rec, out, exit_msg = _run(fn, cfg, lambda a: "")
+            assert exit_msg and "deployed_by" in exit_msg, (fn.__name__, bad, exit_msg, out)
+
+
+def test_prune_act_as_leaves_deployed_by_members_alone():
+    cfg = {"service_accounts": [{"name": "api-run", "deployed_by": ["api-deployer"]}]}
+    reads = lambda a: (DEPLOYER_MEMBER if "api-run@" in " ".join(a) else "")
+    rec, out, exit_msg = _run(P.prune_act_as, cfg, reads)
+    assert exit_msg is None and rec.calls == [], (exit_msg, rec.calls, out)
+
+
 if __name__ == "__main__":
-    fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
+    fns =[v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0
     for fn in fns:
         try:

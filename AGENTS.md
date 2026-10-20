@@ -34,6 +34,12 @@ which pins a **full commit SHA**, not `@v1`.
   single SA) and deliberately does NOT create one — an absent target fails loud. Adding a
   handler that CREATES an app-owned resource crosses the ADR-001 line and needs a decision,
   not just a commit; `tests/test_engine.py::test_handlers_are_access_only` guards the set.
+- **One writer per service-account policy** (owner ruling 21). Every SA declared in config is
+  written ONLY by this engine; the project's own automation writes only `<deployable>-deployer`
+  SAs. `sa_audit` therefore has no same-org allowance: on a declared SA only declared
+  `(role, member)` pairs pass. A runtime SA names its project-made deployers with
+  `deployed_by: [<d>-deployer]` (entries must end `-deployer`; `ensure_act_as` binds them as
+  `serviceAccountUser`, `prune_act_as` never removes them).
 - **`principals` is the one block whose member is a HUMAN.** Top-level (not under an SA), kind
   `service_accounts` only, and the role must be in `bootstrap/principal-grantable-roles.txt`.
   IAM does not gate it — `modifiedGrantsByRole` covers project/folder/org policies, not SA

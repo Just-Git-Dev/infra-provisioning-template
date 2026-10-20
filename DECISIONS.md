@@ -5,8 +5,9 @@ the alternatives were. Newest first.
 
 ## Index
 
-18 entries. Newest first.
+19 entries. Newest first.
 
+- [2026-10-20 — One writer per SA policy: sa_audit loses the same-org allowance, new deployed_by key](#2026-10-20--one-writer-per-sa-policy-sa_audit-loses-the-same-org-allowance-new-deployed_by-key)
 - [2026-10-20 — sa_audit is role-aware and runs on every Provision run](#2026-10-20--sa_audit-is-role-aware-and-runs-on-every-provision-run)
 - [2026-10-20 — `wif_subjects` (environment-scoped WIF link) and `sa_audit` (detect-only SA policy audit under `--prune`)](#2026-10-20--wif_subjects-environment-scoped-wif-link-and-sa_audit-detect-only-sa-policy-audit-under---prune)
 - [2026-10-19 — Local gate == CI: make ci, ci.yml calls the same targets, pre-push hook](#2026-10-19--local-gate--ci-make-ci-ciyml-calls-the-same-targets-pre-push-hook)
@@ -25,6 +26,35 @@ the alternatives were. Newest first.
 - [2026-08-21 — caller inputs move to `env:`; CI grows actionlint and lints `action.yml` itself](#2026-08-21--caller-inputs-move-to-env-ci-grows-actionlint-and-lints-actionyml-itself)
 - [2026-08-20 — SHA-pin this repo's own actions and enforce it in CI](#2026-08-20--sha-pin-this-repos-own-actions-and-enforce-it-in-ci)
 - [2026-08-20 — port the two mutation-path engine fixes from the consumer; release v1.0.1](#2026-08-20--port-the-two-mutation-path-engine-fixes-from-the-consumer-release-v101)
+
+## 2026-10-20 — One writer per SA policy: sa_audit loses the same-org allowance, new deployed_by key
+
+**What.** (1) `sa_audit` loses its same-org allowance: `_own_pool_same_org` and the branch that used
+it are deleted, so on a declared SA only the `(role, member)` pairs config declares pass. A repo link
+nobody declared (an own-pool principalSet or an environment subject of the same org) is UNDECLARED,
+whoever added it. (2) New key `deployed_by: [<deployable>-deployer]` on a runtime SA (the TARGET):
+`_declared_sa_grants` counts it, `ensure_act_as` binds each deployer as `roles/iam.serviceAccountUser`
+on that SA, `prune_act_as` leaves it alone (the member is not a declared SA), and an entry that does
+not match `<name>-deployer` stops the run ("deployed_by must be a non-empty list of ...").
+
+**Why (owner ruling 21, one writer per service-account policy; plan
+`infra-provisioning/plans/2026-10-20-repos-as-code-ownership-design.md` option A).** This supersedes
+the same-org allowance kept by the entry "sa_audit is role-aware and runs on every Provision run". That
+allowance existed so the project's F5 links on JGD-declared SAs would not be flagged. Under ruling 21
+the project never writes a JGD SA, so the reason is gone, and the allowance had become the hole: a
+project identity could link any same-org repo to `github-cleaner` (`artifactregistry.admin`) and the
+audit passed it. The key sits on the TARGET because the holder (`<d>-deployer`) is made by the project,
+not declared in JGD config, so `act_as` (declared on the holder) cannot express it.
+
+**Alternatives.** Keep the allowance but narrow it to `wif_repos` SAs: still lets a project add links
+to JGD SAs. A `deployed_by` on the deployer: the deployer is not a JGD SA. Rejected both.
+
+**repoAdmin pin.** Re-checked: `iam.serviceAccounts.setIamPolicy`/`getIamPolicy` are still needed,
+because F5 links and F6 manage the project-made deployers; `update` for F6's description rewrite;
+`run.services.create` for F7. Nothing in the pin is dropped; the narrowing is by name and by audit.
+
+**Release.** None yet; consumers (`infra-provisioning` `provision.yml`) stay on the old pin until the
+owner asks for a tag.
 
 ## 2026-10-20 — sa_audit is role-aware and runs on every Provision run
 
@@ -47,6 +77,8 @@ under the roles they name. A pair not declared is UNDECLARED, except a member of
 (full `projects/<number>/.../workloadIdentityPools/<pool>/` prefix, not an org-name substring) whose repository
 is in the project's org holding `workloadIdentityUser`. An SA config links ONLY by `wif_subjects` gets no
 such leniency: a repo-wide principalSet (a link added to repo-admin) or another environment is UNDECLARED.
+*(The same-org exception is SUPERSEDED 2026-10-20 by "One writer per SA policy": it is deleted; only
+declared pairs pass on any declared SA.)*
 
 **Why report on every run.** The plan says "Provision reports". With the failure under `--prune` only and no
 schedule running `--prune`, detection was off unless a human remembered. The audit reads one policy per
