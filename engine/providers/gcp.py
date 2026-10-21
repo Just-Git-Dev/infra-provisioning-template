@@ -988,6 +988,86 @@ def audit_service_accounts(cfg, project):
                  "so it proves nothing")
 
 
+# The predefined roles the service's own deployer holds on its `<d>-env` secret so the sync can
+# read, add, disable and destroy versions (owner ruling 24, Q3: destroy allowed, so no custom role).
+_SYNC_ROLES = ("roles/secretmanager.secretAccessor", "roles/secretmanager.secretVersionManager",
+               "roles/secretmanager.viewer")
+_RUN_SECRET_ROLE = "roles/secretmanager.secretAccessor"
+
+
+def _expected_secret_policies(cfg, project):
+    """{secret name: {(role, member), ...}} derived from JGD config ALONE: every `<d>-run` that
+    names `deployed_by: [<d>-deployer]` expects `<d>-env` to hold exactly the runtime accessor
+    line and the deployer's sync roles. Never reads the repos register (ruling 12)."""
+    out = {}
+    for sa in cfg.get("service_accounts") or []:
+        for deployer in _deployed_by(sa):
+            d = sa["name"][:-len("-run")]
+            want = {(_RUN_SECRET_ROLE, f"serviceAccount:{sa_email(sa['name'], project)}")}
+            want |= {(r, f"serviceAccount:{sa_email(deployer, project)}") for r in _SYNC_ROLES}
+            out[f"{d}-env"] = want
+    return out
+
+
+def _secret_audit_findings(cfg, project):
+    """([finding, ...], examined) — reads one policy per expected secret; mutates nothing. An
+    absent secret is `info` (the service may have none yet) and is not counted as examined."""
+    findings, examined = [], 0
+    for secret, want in sorted(_expected_secret_policies(cfg, project).items()):
+        raw = gout(["secrets", "get-iam-policy", secret, "--project", project,
+                    "--format=json"], project)
+        if not raw:
+            c("skip", f"{secret}: no such secret (or unreadable) - not examined")
+            continue
+        examined += 1
+        have, bad = set(), []
+        for b in json.loads(raw).get("bindings") or []:
+            role = b.get("role")
+            for m in b.get("members") or []:
+                have.add((role, m))
+                if b.get("condition"):
+                    bad.append(f"{m} holds {role} under an IAM condition")
+                elif (role, m) not in want:
+                    bad.append(f"{m} holds {role}")
+        bad += [f"missing: {m} should hold {role}" for role, m in sorted(want - have)]
+        for f in bad:
+            c("err", f"UNEXPECTED on {secret}: {f}")
+        findings += [f"{secret}: {f}" for f in bad]
+        if not bad:
+            c("ok", f"{secret}: policy is exactly the expected one")
+    return findings, examined
+
+
+def _secret_audit_summary(findings, examined, tail, absent=0):
+    for f in findings:
+        print(f"::warning::secret_audit {f}")
+    print(f"secret_audit: examined {examined} secret(s)"
+          + (f" ({absent} absent: not adopted yet)" if absent else "")
+          + f", {len(findings)} finding(s)"
+          + (f" - {tail}" if findings else ""))
+
+
+def report_secret_policies(cfg, project):
+    """DETECT drift on the policy of every `<d>-env` secret, on EVERY Provision run. Reports
+    `::warning::` lines and a count; never fails, never changes anything."""
+    print("secret_audit:")
+    findings, examined = _secret_audit_findings(cfg, project)
+    absent = len(_expected_secret_policies(cfg, project)) - examined
+    _secret_audit_summary(findings, examined, "a human reviews them; `--prune` fails on them", absent)
+
+
+def audit_secret_policies(cfg, project):
+    """The `--prune` variant of `report_secret_policies`: same detect-only audit, but a finding fails the run (an absent secret is
+    info, devops ruling 2026-10-20; gout already fails loudly on an unreadable one). Never removes
+    anything: the identity that benefits from a grant must not be the one that removes it."""
+    print("audit secret_audit:")
+    findings, examined = _secret_audit_findings(cfg, project)
+    absent = len(_expected_secret_policies(cfg, project)) - examined
+    _secret_audit_summary(findings, examined, "not removed by design", absent)
+    if findings:
+        sys.exit("secret audit FAILED, unexpected policy lines: " + "; ".join(findings))
+
+
 def prune_provisioner(cfg, project):
     """Remove any PROJECT role on the provisioner SA that is not in
     bootstrap/provisioner-roles.txt (the shared kept-set). Safe: projectIamAdmin is kept,
@@ -1057,11 +1137,13 @@ PRUNERS = {
     "principals": prune_principals,
     "provisioner": prune_provisioner,
     "sa_audit": audit_service_accounts,
+    "secret_audit": audit_secret_policies,
 }
 
 # Read-only and registered LAST (run order): reports on EVERY run, dry-run included, and never
 # fails or fixes. Under --prune the registry above runs instead and its variant FAILS on findings.
 HANDLERS["sa_audit"] = report_service_accounts
+HANDLERS["secret_audit"] = report_secret_policies
 
 
 # ── provider contract (used by the multi-target CLI loop, ADR-003 §5) ─────────
