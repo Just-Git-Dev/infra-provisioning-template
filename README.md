@@ -186,7 +186,10 @@ grant on the same SA — is left alone.
 - `core.py` — provider-agnostic reconcile discipline: dry-run gate, `do()`/`undo()`,
   fail-loud `read()`, plan printer. **Dry-run is accurate** — existence is checked, only
   mutations are withheld, so a `~ would` line is a real change an apply would make.
-- `providers/gcp.py` — the `gcloud` seam + access handlers/pruners.
+- `providers/gcp.py` — the `gcloud` seam + access handlers/pruners. A custom role
+  (`organizations/<id>/roles/x`, `projects/<id>/roles/x`) is verified to exist
+  (`gcloud iam roles describe`, needs `iam.roles.get`) before its binding is planned; a missing
+  one fails the run instead of printing `~ would`.
 - `providers/kubernetes.py` — the `kubectl` seam + tenancy/identity + exposure handlers/pruners.
 - `provision.py` — the CLI: load config → dispatch to provider target(s).
 
