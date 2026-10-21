@@ -533,8 +533,13 @@ def test_plain_roles_are_untouched_by_the_capability_path():
     that mangled every ordinary role."""
     cfg = {"service_accounts": [{"name": "sa1", "roles": ["run.admin",
                                                           "projects/p/roles/jgdCustom"]}]}
+    # The custom role must exist to be planned (DECISIONS 2026-10-21); the lookup itself is
+    # covered in test_custom_role_exists.py, so seed the per-run cache here.
+    P._ROLE_STATE.clear()
+    P._ROLE_STATE["projects/p/roles/jgdCustom"] = True
     out = _with_capabilities(OBS, lambda: drive(P.ensure_service_accounts, cfg,
                                                 lambda args: ""))
+    P._ROLE_STATE.clear()
     assert "would   bind roles/run.admin → sa1" in out, out
     assert "would   bind projects/p/roles/jgdCustom → sa1" in out, out
 

@@ -59,6 +59,36 @@ def undo(args, project, describe):
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
+_ROLE_STATE = {}    # custom role -> bool exists (one lookup per role per run)
+
+
+def require_role_exists(role):
+    """Fail loudly unless a CUSTOM role (`organizations/<o>/roles/x`, `projects/<p>/roles/x`) exists.
+
+    Without this a dry-run printed `~ would bind <missing role>` and the apply then failed
+    INVALID_ARGUMENT (DECISIONS 2026-10-21). Predefined `roles/...` need no lookup. NOT_FOUND, a
+    DISABLED stage or `deleted` count as missing; any other lookup error (e.g. PERMISSION_DENIED
+    for iam.roles.get) is a hard failure via core.read — never read as "exists"."""
+    scope, _, rest = role.partition("/")
+    if scope not in ("organizations", "projects") or "/roles/" not in role:
+        return
+    if role not in _ROLE_STATE:
+        owner, _, name = rest.partition("/roles/")
+        flag = "--organization" if scope == "organizations" else "--project"
+        args = ["iam", "roles", "describe", name, f"{flag}={owner}", "--format=value(name,stage,deleted)"]
+        out = core.read(lambda: gcloud(args, check=True).stdout, ("NOT_FOUND", "was not found"),
+                        label=" ".join(args))
+        cols = out.split("\t")
+        _ROLE_STATE[role] = bool(out) and (cols + ["", "", ""])[1] != "DISABLED" \
+            and (cols + ["", "", ""])[2].lower() != "true"
+    if not _ROLE_STATE[role]:
+        raise SystemExit(
+            f"custom role {role} does not exist (or is deleted/disabled). Binding it would fail at "
+            f"apply (INVALID_ARGUMENT), so the plan refuses to print `~ would` for it. Create it "
+            f"first: bootstrap/manage-roles.sh (a human with the right org role) or the "
+            f"manage-custom-roles.yml workflow, then re-run.")
+
+
 def sa_email(name, project):
     return f"{name}@{project}.iam.gserviceaccount.com"
 
@@ -180,6 +210,7 @@ def ensure_service_accounts(cfg, project):
         # One role per call — never a batch. A capability expanding to N roles emits N
         # calls for the hasOnly() reason spelled out above _expand_roles.
         for role in roles:
+            require_role_exists(role)
             if sa_has_role(project, email, role):
                 c("ok", f"  role {role}")
             else:
@@ -511,6 +542,7 @@ def ensure_resource_roles(cfg, project):
                 f"then re-run. This provider binds on resources, it never creates them.")
         held = {r for r, m in resource_policy(kind, ref, project) if m == member}
         for role in roles:
+            require_role_exists(role)
             if role in held:
                 c("ok", f"  {spec['noun']} {name}: {role}")
             else:

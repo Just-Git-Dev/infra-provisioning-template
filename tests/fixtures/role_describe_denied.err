@@ -1,0 +1,7 @@
+ERROR: (gcloud.iam.roles.describe) PERMISSION_DENIED: You don't have permission to get the role at projects/no-such-proj-zz9/roles/repoAdmin. This command is authenticated as akshat.kumar.singhal@gmail.com which is the active account specified by the [core/account] property.
+- '@type': type.googleapis.com/google.rpc.ErrorInfo
+  domain: iam.googleapis.com
+  metadata:
+    permission: iam.roles.get
+    resource: projects/no-such-proj-zz9/roles/repoAdmin
+  reason: IAM_PERMISSION_DENIED

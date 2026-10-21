@@ -44,6 +44,7 @@ tests: venv
 	$(PY) tests/test_kubernetes.py
 	$(PY) tests/test_repo_links.py
 	$(PY) tests/test_service_agents.py
+	$(PY) tests/test_custom_role_exists.py
 	$(PY) tests/test_secret_audit.py
 	$(PY) tests/test_anchor.py
 	$(PY) tests/test_ci_make_targets.py

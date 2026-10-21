@@ -5,8 +5,9 @@ the alternatives were. Newest first.
 
 ## Index
 
-22 entries. Newest first.
+23 entries. Newest first.
 
+- [2026-10-21 — Dry-run verifies a custom role exists before planning its binding](#2026-10-21--dry-run-verifies-a-custom-role-exists-before-planning-its-binding)
 - [2026-10-20 — secret_audit: detect-only audit of the policy of each <d>-env secret](#2026-10-20--secret_audit-detect-only-audit-of-the-policy-of-each-d-env-secret)
 - [2026-10-20 — service_agents: declare a Google service agent's role on a runtime SA (phase 1, declare-only)](#2026-10-20--service_agents-declare-a-google-service-agents-role-on-a-runtime-sa-phase-1-declare-only)
 - [2026-10-20 — deployed_by hardening: deployer must exist, own-deployer only, prune-safe](#2026-10-20--deployed_by-hardening-deployer-must-exist-own-deployer-only-prune-safe)
@@ -29,6 +30,18 @@ the alternatives were. Newest first.
 - [2026-08-21 — caller inputs move to `env:`; CI grows actionlint and lints `action.yml` itself](#2026-08-21--caller-inputs-move-to-env-ci-grows-actionlint-and-lints-actionyml-itself)
 - [2026-08-20 — SHA-pin this repo's own actions and enforce it in CI](#2026-08-20--sha-pin-this-repos-own-actions-and-enforce-it-in-ci)
 - [2026-08-20 — port the two mutation-path engine fixes from the consumer; release v1.0.1](#2026-08-20--port-the-two-mutation-path-engine-fixes-from-the-consumer-release-v101)
+
+## 2026-10-21 — Dry-run verifies a custom role exists before planning its binding
+
+**Symptom.** The realm-id dry-run printed `~ would bind organizations/250926570441/roles/repoAdmin → repo-admin`, but that custom role did not exist; the apply then failed `INVALID_ARGUMENT: Role (...) does not exist in the resource's hierarchy`.
+
+**Root cause.** `ensure_service_accounts` / `ensure_resource_roles` asked only "does the SA already hold this role?" (`sa_has_role`). For a custom role that is false whether the role is missing or the binding is, so dry-run planned a bind the apply could not make. Dry-run guessed that the role exists.
+
+**Why it wasn't caught.** Tests used a custom role name (`projects/p/roles/jgdCustom`) that never existed and the stubs answered "" to everything, so "role absent" and "binding absent" were indistinguishable and the planned bind looked right.
+
+**Fix.** `require_role_exists()` in `providers/gcp.py` runs `gcloud iam roles describe <name> --organization=<id>|--project=<id> --format=value(name,stage,deleted)` for every `organizations/<o>/roles/x` / `projects/<p>/roles/x` before planning its binding, in dry-run and apply, one lookup per role per run. NOT_FOUND, stage DISABLED or `deleted` true = missing: SystemExit naming the role and pointing at bootstrap/manage-roles.sh / manage-custom-roles.yml. Any other lookup error (PERMISSION_DENIED, network) fails closed via `core.read`. Predefined `roles/...` need no lookup. The deleted/disabled branch is unverified against a real deleted role (none to record). Tests: `tests/test_custom_role_exists.py` with recorded gcloud output in `tests/fixtures/`. NOTE: the provisioner SA needs `iam.roles.get` (roles/iam.roleViewer); none of its kept roles in bootstrap/provisioner-roles.txt carries it, so a consumer must grant it before this lookup works live.
+
+**Prevention.** The rule "a `~ would` is a change apply can make" now holds for custom roles; stubs for role bindings must model role existence separately from binding existence, with recorded fixtures.
 
 ## 2026-10-20 — secret_audit: detect-only audit of the policy of each <d>-env secret
 
