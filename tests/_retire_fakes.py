@@ -23,18 +23,30 @@ def email(name, project=PROJECT):
     return f"{name}@{project}.iam.gserviceaccount.com"
 
 
-def model_gout(live=(), roles=None, extra_listed=()):
-    """gout stub for one project.
+def model_gout(live=(), roles=None, extra_listed=(), list_returns=None, projects=None):
+    """gout stub. `live`/`roles` model project PROJECT; `projects={"q": (live, roles)}` adds more.
 
     live: SA names that exist. roles: {sa name: [project roles it holds]}.
-    extra_listed: raw emails that `service-accounts list` also returns (Google-managed etc.)."""
-    roles = roles or {}
-    by_email = {email(n): n for n in live}
+    extra_listed: raw emails that `service-accounts list` also returns (Google-managed etc.).
+    list_returns: if not None, `service-accounts list` returns exactly this string."""
+    model = {PROJECT: (list(live), roles or {})}
+    model.update({k: (list(v[0]), v[1]) for k, v in (projects or {}).items()})
 
     def gout(args, project=None):
         j = " ".join(args)
-        if args[:2] == ["iam", "service-accounts"] and args[2] == "list":
-            return "\n".join([email(n) for n in live] + list(extra_listed))
+        is_list = args[:2] == ["iam", "service-accounts"] and args[2] == "list"
+        if args[:2] in (["projects", "get-iam-policy"], ["projects", "describe"]):
+            pid = args[2]
+        elif is_list:
+            pid = project
+        else:
+            pid = args[3].split("@")[1].split(".")[0]
+        live_p, roles_p = model[pid]
+        by_email = {email(n, pid): n for n in live_p}
+        if is_list:
+            if list_returns is not None:
+                return list_returns
+            return "\n".join([email(n, pid) for n in live_p] + list(extra_listed))
         if args[:2] == ["iam", "service-accounts"] and args[2] == "describe":
             return "x\t" + P._described("") if args[3] in by_email else ""
         if args[:2] == ["iam", "service-accounts"] and args[2] == "get-iam-policy":
@@ -42,13 +54,30 @@ def model_gout(live=(), roles=None, extra_listed=()):
         if args[:2] == ["projects", "get-iam-policy"]:
             for em, n in by_email.items():
                 if f"bindings.members=serviceAccount:{em}" in j:
-                    return "\n".join(roles.get(n, []))
+                    return "\n".join(roles_p.get(n, []))
             return ""
         if args[:2] == ["projects", "describe"]:
             return "123"
         return ""
 
     return gout
+
+
+def install_via_gcloud(model, fail_on):
+    """Use the REAL gout (fail-loud read) over a stubbed gcloud: `model(args, project)` answers
+    reads, and any argv for which `fail_on(args)` is true fails PERMISSION_DENIED. Proves a failed
+    read ends the run instead of reading as an empty (clean) result."""
+    core.DRY = True
+    core.MUTATIONS = 0
+    core.STRAY = []
+
+    def gcloud(args, project=None, check=True):
+        if fail_on(args):
+            raise subprocess.CalledProcessError(1, ["gcloud"] + args, stderr="ERROR: PERMISSION_DENIED")
+        return subprocess.CompletedProcess(args, 0, stdout=model(args, project), stderr="")
+
+    P.gout = ORIG_GOUT
+    P.gcloud = gcloud
 
 
 class Recorder:

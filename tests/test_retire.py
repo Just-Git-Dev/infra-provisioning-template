@@ -151,6 +151,34 @@ def test_retire_refuses_provisioner_identity():
     assert core.MUTATIONS == 0
 
 
+def test_retire_refuses_a_retired_sa_whose_email_is_the_configured_anchor():
+    # `old-bot` passes validate_retired (not the PROVISIONER_SA name), but the config names its
+    # EMAIL as the provisioner: only the email guard in retire_service_accounts stops it.
+    cfg = {"provisioner": {"service_account": email("old-bot")},
+           "service_accounts": [RETIRED]}
+    assert call(P.validate_retired, cfg)[1] is None
+    rec = install(model_gout(live=["old-bot"]), dry=False)
+    out, exc, _ = call(P.retire_service_accounts, cfg, PROJECT)
+    assert exc is not None and "provisioner identity" in str(exc.code), (exc, out)
+    assert deletes(rec) == [] and core.MUTATIONS == 0
+
+
+def test_retire_is_all_or_nothing_across_targets():
+    t1 = {"kind": "gcp", "project": {"gcp_id": "p", "github_org": "o"}, "service_accounts": [RETIRED]}
+    t2 = {"kind": "gcp", "project": {"gcp_id": "q", "github_org": "o"},
+          "service_accounts": [{"name": "busy-bot", "retire": True}]}
+    config_root(cfg={"targets": [t1, t2]})
+    rec = install(model_gout(live=["old-bot"], projects={"q": (["busy-bot"], {"busy-bot": ["roles/run.developer"]})}),
+                  dry=False)
+    out, exc, _ = call(provision.run, "k", apply=True, retire=True)
+    assert exc is not None and "busy-bot" in str(exc.code), (exc, out)
+    assert deletes(rec) == [], rec.calls          # target 1 was clean, yet nothing was deleted
+    # control: with the blocker gone both targets delete
+    rec = install(model_gout(live=["old-bot"], projects={"q": (["busy-bot"], {})}), dry=False)
+    out, exc, _ = call(provision.run, "k", apply=True, retire=True)
+    assert exc is None and len(deletes(rec)) == 2, (exc, out, rec.calls)
+
+
 def test_retire_cli_mutually_exclusive_with_prune():
     old = sys.argv
     try:
