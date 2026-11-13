@@ -5,8 +5,9 @@ the alternatives were. Newest first.
 
 ## Index
 
-23 entries. Newest first.
+24 entries. Newest first.
 
+- [2026-11-13 — SA retirement: `retire: true`, a `--retire` deleter mode, orphan and stray-role detection](#2026-11-13--sa-retirement-retire-true-a---retire-deleter-mode-orphan-and-stray-role-detection)
 - [2026-10-21 — Dry-run verifies a custom role exists before planning its binding](#2026-10-21--dry-run-verifies-a-custom-role-exists-before-planning-its-binding)
 - [2026-10-20 — secret_audit: detect-only audit of the policy of each <d>-env secret](#2026-10-20--secret_audit-detect-only-audit-of-the-policy-of-each-d-env-secret)
 - [2026-10-20 — service_agents: declare a Google service agent's role on a runtime SA (phase 1, declare-only)](#2026-10-20--service_agents-declare-a-google-service-agents-role-on-a-runtime-sa-phase-1-declare-only)
@@ -30,6 +31,20 @@ the alternatives were. Newest first.
 - [2026-08-21 — caller inputs move to `env:`; CI grows actionlint and lints `action.yml` itself](#2026-08-21--caller-inputs-move-to-env-ci-grows-actionlint-and-lints-actionyml-itself)
 - [2026-08-20 — SHA-pin this repo's own actions and enforce it in CI](#2026-08-20--sha-pin-this-repos-own-actions-and-enforce-it-in-ci)
 - [2026-08-20 — port the two mutation-path engine fixes from the consumer; release v1.0.1](#2026-08-20--port-the-two-mutation-path-engine-fixes-from-the-consumer-release-v101)
+
+## 2026-11-13 — SA retirement: `retire: true`, a `--retire` deleter mode, orphan and stray-role detection
+
+**Decision.** `service_accounts[].retire: true` marks an SA for deletion. Add mode skips it, `--prune` strips all its project roles, and a new `--retire` mode (action input `retire`) is the only code path that deletes. `--retire` runs only the retire pass, deletes an SA only if it is marked, live and holds zero project roles, and deletes nothing if any marked SA fails that check. Dry-run stays the default and the delete goes through `core.undo`, so it is counted and withheld.
+
+**Why a separate mode.** Removing roles (prune) and deleting the identity are different blast radii; deletion is not fully reversible (30-day undelete only). Keeping it out of the add and prune paths lets a test prove those never emit `service-accounts delete`, and lets a caller give the retire run its own identity and approval. The separation is in code; whether the identity running the engine also lacks delete permission is the caller's (topology's) decision.
+
+**Orphans.** `sa_audit` lists live SAs and reports any that config neither declares, marks `retire: true`, nor names in a `deployed_by` list (project-made deployers are known, not orphans). Google-managed agents, the default compute SA, `firebase-adminsdk-*` and the anchor SA are excluded. Warns on every run; fails under `--prune`.
+
+**Stray roles (no revoke identity).** GCP cannot allow "revoke any role, grant none": `modifiedGrantsByRole` lists roles modified by a grant or a revoke without telling them apart. So a role outside `grantable-roles.txt` cannot be removed by the provisioner, and prune used to print `~ would unbind` for it that apply was then denied on, which broke the dry-run-is-accurate rule. Now such a role is reported `stray`, not counted as a mutation, makes `--prune` exit non-zero, and `sa_audit` reports it. The allow-list is read from `core.config_root()` (the topology copy), not the engine checkout, because the two copies differ.
+
+**Alternatives rejected.** An unconditioned revoke identity (could also grant `roles/owner`); a fixed trailer or silent skip for stray roles.
+
+**Not here.** Narrowing the provisioner's own delete permission, the identity that runs `--retire`, and workflows are topology-side.
 
 ## 2026-10-21 — Dry-run verifies a custom role exists before planning its binding
 

@@ -74,6 +74,7 @@ kubectl for k8s targets); the action just runs the reconcile.
 | `apply` | `false` | apply changes (default: dry-run/plan) |
 | `prune` | `false` | subtractive reconcile — remove bindings/objects config no longer declares |
 | `only` | `''` | run a single subsystem/pruner |
+| `retire` | `false` | the ONE deleting mode: delete service accounts marked `retire: true` (see below). Mutually exclusive with `prune`; `only` is invalid with it |
 | `config-root` | `${{ github.workspace }}` | root holding `projects/<key>/config.yaml` |
 
 ## Config schema
@@ -181,6 +182,38 @@ Deliberately narrow, and it fails loud rather than widening quietly:
 all ones this config declares. A human binding the config does not mention — anyone else's
 grant on the same SA — is left alone.
 
+### `retire: true` — mark a service account for deletion
+
+```yaml
+service_accounts:
+  - name: old-bot
+    retire: true
+    reason: replaced by new-bot   # optional; `description` is also allowed
+```
+
+A retired entry may carry only `name`, `retire`, and an optional `description`/`reason`.
+Validation fails the run if it also has `roles`, `act_as`, `wif_repos`, `wif_subjects`,
+`deployed_by`, `service_agents`, `resource_roles`, or if any other entry names it in `act_as`
+or `deployed_by` or a `resource_roles.service_accounts` / `principals` target.
+
+- Add mode never creates it and never binds to it.
+- `--prune` strips every project role it holds (`want = {}`).
+- `--retire` (action input `retire: true`) is the only mode that deletes. It runs ONLY the
+  retire pass: no add handlers, no pruners. It deletes an SA only if the SA is marked
+  `retire: true`, is live, and holds zero project roles, and it checks every marked SA first and
+  deletes nothing if any one still holds a role. Dry-run is the default: the deletion is counted
+  and printed `~ would delete`, never performed. An already-absent SA reports
+  `deleted, drop the entry`; drop the entry in a follow-up change.
+- `sa_audit` reports an **orphan**: a live `<name>@<project>.iam.gserviceaccount.com` that config
+  neither declares, nor marks `retire: true`, nor names in a `deployed_by` list. Google-managed
+  agents, the default compute SA, `firebase-adminsdk-*` and the anchor SA are excluded. It warns
+  on every run and fails under `--prune`.
+- **Stray roles.** A project role an SA holds that config does not declare AND that is outside
+  `<config-root>/bootstrap/grantable-roles.txt` cannot be removed by the provisioner (IAM denies
+  the revoke: GCP cannot express "revoke but never grant"). `--prune` reports it as
+  `stray`, does not count it as a removal, and exits non-zero at the end; `sa_audit` reports it
+  too. A human removes it. The allow-list is read from the CONFIG root, not the engine checkout.
+
 ## The engine (`engine/`)
 
 - `core.py` — provider-agnostic reconcile discipline: dry-run gate, `do()`/`undo()`,
@@ -198,6 +231,7 @@ python3 engine/provision.py <key>                 # dry-run all subsystems (uses
 python3 engine/provision.py <key> --apply         # apply
 python3 engine/provision.py <key> --only wif      # one subsystem
 python3 engine/provision.py <key> --prune         # plan removals (subtractive)
+python3 engine/provision.py <key> --retire        # plan deletion of `retire: true` SAs
 python3 tests/test_engine.py && python3 tests/test_kubernetes.py   # seams stubbed; no cloud
 ```
 
@@ -253,6 +287,10 @@ Edit the `PROVISIONER_REPO` / `PROJECTS` placeholders (or set `PROVISIONER_REPO`
 - **Keyless:** WIF/OIDC everywhere — no long-lived keys or secrets in a consumer repo.
 - **Pin third-party actions to a commit SHA** for production (the examples use `@vN` tags for
   readability). This engine mints cloud credentials — treat a moved tag as a supply-chain event.
+- **Deletion is a separate, explicit mode.** Only `--retire` deletes a service account, and only one marked
+  `retire: true`, live, and holding zero project roles; no add or prune path emits
+  `service-accounts delete` (a test scans every argv). The separation is in code, not in identity:
+  the identity running the engine may still hold delete permission.
 - **Prune is opt-in and conservative:** k8s prune is label-scoped and never deletes a Namespace
   or ResourceQuota.
 
