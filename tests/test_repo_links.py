@@ -238,7 +238,9 @@ def test_audit_examines_every_declared_sa_not_just_the_first():
         j = " ".join(args)
         if "get-iam-policy" in j and "--format=json" in j:
             seen.append(j)
-        return json.dumps({"bindings": []})
+        # Only the SA-policy read is JSON; the project-role and SA-list reads (stray-role and
+        # orphan passes) are plain lists and must not be handed a JSON blob.
+        return json.dumps({"bindings": []}) if "--format=json" in j else ""
     rec, out, exit_msg = _run(P.audit_service_accounts, _audit_cfg(), reads)
     assert exit_msg is None, exit_msg
     assert any("svc-a@p." in s for s in seen) and any("deployer@p." in s for s in seen), seen

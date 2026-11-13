@@ -46,6 +46,11 @@ _TTY = sys.stdout.isatty()
 # provision.run(); a caller driving the engine in-process must reset it too.
 MUTATIONS = 0
 
+# Roles a prune FOUND but the provisioner cannot remove (outside the config root's
+# grantable-roles.txt — IAM would deny the revoke). Reported, never counted as a mutation; the
+# CLI turns a non-empty list into a non-zero exit at the end of a prune. Reset by provision.run().
+STRAY = []
+
 
 def c(tag, msg):
     col = {"ok": "32", "add": "33", "dry": "36", "err": "31", "skip": "90", "del": "35"}.get(tag, "0")

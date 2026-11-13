@@ -173,9 +173,74 @@ def provisioner_kept_roles(project=None):
     return roles
 
 
+def grantable_roles():
+    """Roles the provisioner may grant — and therefore REMOVE — at project level: the topology's
+    `bootstrap/grantable-roles.txt`. Read from the CONFIG root (`core.config_root()`), never the
+    engine checkout (`core.ROOT`): the engine is a SHA-pinned action and the two copies differ.
+    Fails loud when missing: an empty set would call every extra role 'stray' and an absent file
+    must not read as a clean run."""
+    path = os.path.join(core.config_root(), "bootstrap", "grantable-roles.txt")
+    if not os.path.exists(path):
+        sys.exit(f"{path} not found — the stray-role check needs the config root's "
+                 f"grantable-roles.txt (set --config-root / $PROVISION_CONFIG_ROOT)")
+    roles = set()
+    with open(path) as fh:
+        for line in fh:
+            line = line.split("#", 1)[0].strip()
+            if line:
+                roles.add(_qualify(line))
+    return roles
+
+
+# ── retirement: `retire: true` marks an SA for deletion by the --retire mode ───
+# A retired entry is a TOMBSTONE: it may carry only these keys, so no handler can bind to it.
+_RETIRE_KEYS = {"name", "retire", "description", "reason"}
+
+
+def _retired(sa):
+    """True only for a literal `retire: true` — never a truthy string, so a typo cannot delete."""
+    return sa.get("retire") is True
+
+
+def validate_retired(cfg):
+    """Fail the run on a malformed tombstone. A retired SA may carry only name/retire/description/
+    reason, may not be the anchor SA, and may not be referenced (act_as, deployed_by,
+    resource_roles.service_accounts, principals targets) by anything else."""
+    sas = cfg.get("service_accounts") or []
+    for sa in sas:
+        if "retire" in sa and not isinstance(sa["retire"], bool):
+            sys.exit(f"service account {sa.get('name')!r}: retire must be true or false, "
+                     f"got {sa['retire']!r}")
+    retired = {sa["name"] for sa in sas if _retired(sa)}
+    if not retired:
+        return
+    for sa in sas:
+        if sa["name"] in retired:
+            extra = sorted(set(sa) - _RETIRE_KEYS)
+            if extra:
+                sys.exit(f"service account {sa['name']!r} is retire: true and may carry only "
+                         f"name/retire/description/reason, not {extra}")
+            if sa["name"] == PROVISIONER_SA:
+                sys.exit(f"service account {sa['name']!r} is the provisioner identity — it can "
+                         f"never be retired")
+    for sa in sas:
+        refs = list(sa.get("act_as") or []) + [d for d in (sa.get("deployed_by") or [])
+                                              if isinstance(d, str)]
+        refs += list(((sa.get("resource_roles") or {}).get("service_accounts") or {}))
+        for p in cfg.get("principals") or []:
+            refs += list((((p or {}).get("resource_roles") or {}).get("service_accounts") or {}))
+        for r in sorted(set(refs) & retired):
+            sys.exit(f"service account {r!r} is retire: true but is still referenced "
+                     f"(act_as / deployed_by / resource_roles / principals) — drop the reference first")
+
+
 # ── subsystem handlers ───────────────────────────────────────────────────────
 def ensure_service_accounts(cfg, project):
     print("service_accounts:")
+    validate_retired(cfg)
+    for sa in cfg.get("service_accounts", []):
+        if _retired(sa):
+            c("skip", f"sa {sa['name']}: retire: true — never created or bound here")
     # Capabilities are expanded for EVERY SA before the first mutation is emitted, so an
     # unknown capability name fails the plan rather than surfacing after some SAs are bound.
     for sa, roles in _sa_roles(cfg):
@@ -492,7 +557,7 @@ def _sa_roles(cfg, caps=None):
     fifth SA must not surface after four have already been bound under --apply."""
     caps = capabilities() if caps is None else caps
     return [(sa, _expand_roles(sa.get("roles"), f"service_accounts: {sa['name']}", caps))
-            for sa in cfg.get("service_accounts", [])]
+            for sa in cfg.get("service_accounts", []) if not _retired(sa)]
 
 
 def _declared_resource_roles(cfg, project):
@@ -763,18 +828,29 @@ def _remove_binding(project, email, role, who):
 
 def prune_service_accounts(cfg, project):
     print("prune service_accounts:")
+    validate_retired(cfg)
+    allow = None
     for sa in cfg.get("service_accounts", []):
         name, email = sa["name"], sa_email(sa["name"], project)
         # Expanded, or every role a capability grants reads as "extra" and the pruner
-        # unbinds exactly what the config just asked for.
-        want = set(_expand_roles(sa.get("roles"), f"service_accounts: {sa['name']}"))
+        # unbinds exactly what the config just asked for. A retired SA wants NOTHING.
+        want = set() if _retired(sa) else set(
+            _expand_roles(sa.get("roles"), f"service_accounts: {sa['name']}"))
         live = sa_project_roles(project, email)
         extra = [r for r in live if r not in want]
         if not extra:
             c("ok", f"{name}: no extra roles")
             continue
+        allow = grantable_roles() if allow is None else allow
         for role in extra:
-            _remove_binding(project, email, role, name)
+            if role in allow:
+                _remove_binding(project, email, role, name)
+            else:
+                # IAM would deny this revoke at apply (GCP cannot express "revoke but never
+                # grant"), so planning `~ would unbind` would make the dry-run a lie. Report it
+                # for a human; not a mutation, but the prune fails at the end.
+                c("err", f"{name}: stray {role} (provisioner cannot remove — IP3)")
+                core.STRAY.append(f"{name}: {role}")
 
 
 def provisioner_identity(cfg, project):
@@ -957,18 +1033,34 @@ def _sa_audit_findings(cfg, project):
     A (role, member) binding is expected only when config declares that exact pair (owner ruling
     21: one writer per SA policy). There is no same-org allowance: a repo link nobody declared on a
     declared SA is UNDECLARED, whoever added it."""
+    validate_retired(cfg)
     sas = cfg.get("service_accounts") or []
     base = _wif_base(cfg, project)
     declared = _declared_sa_grants(cfg, project, base)
     findings, examined = [], 0
+    allow = None
     for sa in sas:
         email = sa_email(sa["name"], project)
         raw = gout(["iam", "service-accounts", "get-iam-policy", email, "--project", project,
                     "--format=json"], project)
         if not raw:
-            c("skip", f"{sa['name']}: no readable policy (SA absent?)")
+            if _retired(sa):
+                c("ok", f"{sa['name']}: deleted, drop the entry")
+            else:
+                c("skip", f"{sa['name']}: no readable policy (SA absent?)")
             continue
         examined += 1
+        # F3: roles the SA HOLDS on the project (not the policy on it). Only the ones the
+        # provisioner CANNOT remove are findings here; a removable extra is the pruner's work.
+        want_roles = set() if _retired(sa) else set(
+            _expand_roles(sa.get("roles"), f"service_accounts: {sa['name']}"))
+        extra = [r for r in sa_project_roles(project, email) if r not in want_roles]
+        if extra:
+            allow = grantable_roles() if allow is None else allow
+        for role in extra:
+            if role not in allow:
+                c("err", f"STRAY on {sa['name']}: holds {role} (provisioner cannot remove — IP3)")
+                findings.append(f"{sa['name']}: stray project role {role} (a human removes it)")
         want = declared.get(sa["name"], set())
         bad = []
         for b in json.loads(raw).get("bindings") or []:
@@ -982,7 +1074,33 @@ def _sa_audit_findings(cfg, project):
         findings += [f"{sa['name']}: {m} holds {role}" for role, m in bad]
         if not bad:
             c("ok", f"{sa['name']}: every binding is declared")
+    findings += _orphan_findings(cfg, project)
     return findings, examined
+
+
+def _orphan_findings(cfg, project):
+    """Live SAs of this project that config does not know. KNOWN = declared, `retire: true`
+    (even while still live), named in a `deployed_by` list (a project-made deployer), or the
+    anchor SA. EXCLUDED = anything not `<id>@<project>.iam.gserviceaccount.com` (Google-managed
+    agents, the default compute and App Engine SAs live under other domains) and
+    `firebase-adminsdk-*`. Prints how many live SAs it listed so a silent zero is visible."""
+    suffix = f"@{project}.iam.gserviceaccount.com"
+    sas = cfg.get("service_accounts") or []
+    known = {sa["name"] for sa in sas} | {PROVISIONER_SA}
+    known.add(provisioner_identity(cfg, project)[0].split("@")[0])
+    for sa in sas:
+        known.update(d for d in (sa.get("deployed_by") or []) if isinstance(d, str))
+    listed = [e for e in gout(["iam", "service-accounts", "list", "--format=value(email)"],
+                              project).splitlines() if e]
+    orphans = []
+    for e in listed:
+        name = e[:-len(suffix)] if e.endswith(suffix) else None
+        if name is None or name.startswith("firebase-adminsdk") or name in known:
+            continue
+        orphans.append(name)
+        c("err", f"ORPHAN {name}: live but not declared, not retire: true, not in any deployed_by")
+    print(f"sa_audit: listed {len(listed)} live service account(s), {len(orphans)} orphan(s)")
+    return [f"{n}: orphan service account (declare it, or mark it retire: true)" for n in orphans]
 
 
 def _warn_findings(findings, examined, tail):
@@ -1015,7 +1133,7 @@ def audit_service_accounts(cfg, project):
         c("err", "not removed by design — a binding is changed by a human, "
                  "not by the identity that benefits from it")
         sys.exit("service account audit FAILED, undeclared bindings: " + "; ".join(findings))
-    if cfg.get("service_accounts") and examined == 0:
+    if any(not _retired(sa) for sa in cfg.get("service_accounts") or []) and examined == 0:
         sys.exit("service account audit examined 0 service accounts — nothing readable, "
                  "so it proves nothing")
 
@@ -1178,12 +1296,56 @@ HANDLERS["sa_audit"] = report_service_accounts
 HANDLERS["secret_audit"] = report_secret_policies
 
 
+# ── retire (the ONLY deleting mode) ──────────────────────────────────────────
+# `--retire` runs this registry and nothing else: no add handler, no pruner. Deleting an identity
+# is not reversible past 30 days, so it is its own mode with its own gate, and no add or prune
+# path ever emits `service-accounts delete` (tests/test_retire.py scans every argv).
+def retire_service_accounts(cfg, project):
+    """Delete every SA marked `retire: true` that is LIVE and holds ZERO project roles — and
+    delete NOTHING if any marked SA fails that check (all-or-nothing, so a half-retired set is
+    never left behind). Dry-run counts the deletions and withholds them (core.undo)."""
+    print("retire service_accounts:")
+    validate_retired(cfg)
+    marked = [sa for sa in cfg.get("service_accounts") or [] if _retired(sa)]
+    if not marked:
+        c("ok", "no service accounts marked retire: true")
+        return
+    anchor = provisioner_identity(cfg, project)[0]
+    plan, blocked = [], []
+    for sa in marked:
+        name, email = sa["name"], sa_email(sa["name"], project)
+        if name == PROVISIONER_SA or email == anchor:
+            sys.exit(f"retire refused: {email} is the provisioner identity")
+        if not gout(["iam", "service-accounts", "describe", email, "--format=value(email)"], project):
+            c("ok", f"{name}: deleted, drop the entry")
+            continue
+        roles = sa_project_roles(project, email)
+        if roles:
+            c("err", f"{name}: still holds {', '.join(roles)} — run --prune first")
+            blocked.append(f"{name} holds {', '.join(roles)}")
+        else:
+            plan.append((name, email))
+    if blocked:
+        sys.exit("retire refused, nothing deleted: " + "; ".join(blocked))
+    for name, email in plan:
+        undo(["iam", "service-accounts", "delete", email, "--quiet"], project, f"delete sa {email}")
+
+
+RETIRERS = {"service_accounts": retire_service_accounts}
+
+
 # ── provider contract (used by the multi-target CLI loop, ADR-003 §5) ─────────
 # Every provider exposes: context(target) → the ctx its handlers take; preflight(ctx)
 # → cheap reachability check; label(key, target, ctx) → the plan header string.
 def context(target):
     """A gcp target's handler context is just the GCP project id string."""
     return target["project"]["gcp_id"]
+
+
+def validate(target):
+    """Config-shape check the CLI runs BEFORE preflight, so every mode (even `--only wif`)
+    refuses a malformed `retire: true` entry."""
+    validate_retired(target)
 
 
 def preflight(project):

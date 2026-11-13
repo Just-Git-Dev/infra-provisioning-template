@@ -22,6 +22,13 @@ inputs:
     description: 'Subtractive reconcile: remove bindings/objects config no longer declares'
     required: false
     default: 'false'
+  retire:
+    description: >-
+      The ONLY deleting mode: delete service accounts marked retire: true that are live and
+      hold zero project roles (nothing is deleted if any marked SA fails that check). Runs no
+      add handler or pruner. Mutually exclusive with prune; only is invalid with it.
+    required: false
+    default: 'false'
   only:
     description: 'Single subsystem/pruner (blank = all)'
     required: false
@@ -52,12 +59,14 @@ runs:
         IN_PROJECT: ${{ inputs.project }}
         IN_APPLY: ${{ inputs.apply }}
         IN_PRUNE: ${{ inputs.prune }}
+        IN_RETIRE: ${{ inputs.retire }}
         IN_ONLY: ${{ inputs.only }}
       run: |
         set -eo pipefail
         ARGS=()
         [ "$IN_APPLY" = "true" ] && ARGS+=(--apply)
         [ "$IN_PRUNE" = "true" ] && ARGS+=(--prune)
+        [ "$IN_RETIRE" = "true" ] && ARGS+=(--retire)
         [ -n "$IN_ONLY" ] && ARGS+=(--only "$IN_ONLY")
         python3 "${{ github.action_path }}/engine/provision.py" "$IN_PROJECT" "${ARGS[@]}" \
           | tee "${GITHUB_STEP_SUMMARY:-/dev/stdout}"
