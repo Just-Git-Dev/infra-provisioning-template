@@ -192,8 +192,8 @@ def test_gout_real_failure_is_loud():
 def test_prune_service_accounts_removes_only_extra():
     cfg = {"service_accounts": [{"name": "sa1", "roles": ["run.admin"]}]}
     # live: the wanted role + one extra config no longer declares
-    out = drive(P.prune_service_accounts, cfg,
-                lambda args: "roles/run.admin\nroles/monitoring.editor")
+    out = _with_capabilities(None, lambda: drive(
+        P.prune_service_accounts, cfg, lambda args: "roles/run.admin\nroles/monitoring.editor"))
     assert "would unbind roles/monitoring.editor from sa1" in out
     assert "unbind roles/run.admin" not in out          # wanted role is kept
 
@@ -441,6 +441,10 @@ def _with_capabilities(body, fn):
     prev = os.environ.get("PROVISION_CONFIG_ROOT")
     with tempfile.TemporaryDirectory() as tmp:
         os.makedirs(os.path.join(tmp, "bootstrap"))
+        # The config root also carries the allow-list the prune's stray-role check reads
+        # (roles the provisioner can remove); these two are the "extra" roles tests prune.
+        with open(os.path.join(tmp, "bootstrap", "grantable-roles.txt"), "w") as fh:
+            fh.write("roles/editor\nroles/monitoring.editor\n")
         if body is not None:
             with open(os.path.join(tmp, "bootstrap", "capabilities.yaml"), "w") as fh:
                 fh.write(body)

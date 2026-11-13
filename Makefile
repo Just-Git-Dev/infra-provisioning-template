@@ -46,6 +46,9 @@ tests: venv
 	$(PY) tests/test_service_agents.py
 	$(PY) tests/test_custom_role_exists.py
 	$(PY) tests/test_secret_audit.py
+	$(PY) tests/test_retire.py
+	$(PY) tests/test_sa_orphans.py
+	$(PY) tests/test_stray_roles.py
 	$(PY) tests/test_anchor.py
 	$(PY) tests/test_ci_make_targets.py
 	$(PY) tests/test_pre_push_hook.py

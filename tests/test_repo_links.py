@@ -74,8 +74,19 @@ class Recorder:
         P.gcloud = fake_gcloud
 
 
+def _with_live_list(cfg, reads):
+    """The audit also lists live SAs (orphan check) and refuses an EMPTY list when SAs are
+    declared. These tests stub every read; answer that one with the declared SAs."""
+    live = "\n".join(f"{sa['name']}@p.iam.gserviceaccount.com"
+                     for sa in cfg.get("service_accounts") or [])
+
+    def wrapped(args):
+        return live if args[:3] == ["iam", "service-accounts", "list"] else reads(args)
+    return wrapped
+
+
 def _run(handler, cfg, reads):
-    rec = Recorder(reads)
+    rec = Recorder(_with_live_list(cfg, reads))
     rec.install()
     buf, exit_msg = io.StringIO(), None
     saved_dry = core.DRY
@@ -238,7 +249,9 @@ def test_audit_examines_every_declared_sa_not_just_the_first():
         j = " ".join(args)
         if "get-iam-policy" in j and "--format=json" in j:
             seen.append(j)
-        return json.dumps({"bindings": []})
+        # Only the SA-policy read is JSON; the project-role and SA-list reads (stray-role and
+        # orphan passes) are plain lists and must not be handed a JSON blob.
+        return json.dumps({"bindings": []}) if "--format=json" in j else ""
     rec, out, exit_msg = _run(P.audit_service_accounts, _audit_cfg(), reads)
     assert exit_msg is None, exit_msg
     assert any("svc-a@p." in s for s in seen) and any("deployer@p." in s for s in seen), seen
@@ -368,7 +381,7 @@ def test_audit_sa_level_resource_roles_on_service_accounts_are_declared_not_flag
 
 # ── (h) the audit runs on EVERY Provision run and only fails under --prune (M5) ──
 def _run_mode(handler, cfg, reads, dry):
-    rec = Recorder(reads)
+    rec = Recorder(_with_live_list(cfg, reads))
     rec.install()
     core.DRY = dry
     buf, exit_msg = io.StringIO(), None

@@ -14,6 +14,7 @@ checked even in dry-run — only mutations are withheld) and changes nothing.
   python3 engine/provision.py <key> --apply                 # apply (add)
   python3 engine/provision.py <key> --only wif              # one subsystem
   python3 engine/provision.py <key> --prune                # plan removals (subtractive)
+  python3 engine/provision.py <key> --retire               # plan deletion of `retire: true` SAs
   python3 engine/provision.py <key> --config-root /path     # configs live elsewhere (see below)
 
 `<key>` is a folder under `<config-root>/projects/`. **--config-root** decouples the
@@ -70,18 +71,51 @@ def config_root():
     return core.config_root()
 
 
-def run(project_key, apply=False, only=None, prune=False):
+def _retire_all(project_key, targets, mode):
+    """Retire mode, ALL-OR-NOTHING ACROSS TARGETS: validate and check every target's retire set
+    first (reads only), and delete only if no target is blocked. A provider without RETIRERS is
+    skipped before preflight, so no add handler or pruner can run under --retire."""
+    checked, blocked = [], []
+    for target in targets:
+        provider = PROVIDERS[target["kind"]]
+        if not getattr(provider, "RETIRERS", None):
+            continue
+        validate = getattr(provider, "validate", None)
+        if validate:
+            validate(target)
+        ctx = provider.context(target)
+        print(f"{provider.label(project_key, target, ctx)}   mode: {mode}")
+        if not provider.preflight(ctx):
+            sys.exit(f"cannot access {target['kind']} target ({ctx}) — check auth/permissions")
+        for name in provider.RETIRE_CHECKS:
+            print()
+            plan, why = provider.RETIRE_CHECKS[name](target, ctx)
+            blocked += why
+            checked.append((provider, name, plan, ctx))
+    if blocked:
+        sys.exit("retire refused, nothing deleted (checked every target first): " + "; ".join(blocked))
+    for provider, name, plan, ctx in checked:
+        provider.RETIRE_DELETES[name](plan, ctx)
+
+
+def run(project_key, apply=False, only=None, prune=False, retire=False):
     core.DRY = not apply
     core.MUTATIONS = 0
+    core.STRAY = []
     cfg_path = os.path.join(config_root(), "projects", project_key, "config.yaml")
     if not os.path.exists(cfg_path):
         sys.exit(f"no config at {cfg_path}")
     with open(cfg_path) as fh:
         cfg = yaml.safe_load(fh)
 
-    mode = ("PRUNE " if prune else "") + ("APPLY" if apply else "DRY-RUN")
-    for target in targets_of(cfg):
+    mode = ("PRUNE " if prune else "RETIRE " if retire else "") + ("APPLY" if apply else "DRY-RUN")
+    if retire:
+        _retire_all(project_key, targets_of(cfg), mode)
+    for target in ([] if retire else targets_of(cfg)):
         provider = PROVIDERS[target["kind"]]
+        validate = getattr(provider, "validate", None)
+        if validate:
+            validate(target)
         ctx = provider.context(target)
         registry = provider.PRUNERS if prune else provider.HANDLERS
         print(f"{provider.label(project_key, target, ctx)}   mode: {mode}")
@@ -98,21 +132,31 @@ def run(project_key, apply=False, only=None, prune=False):
     # a fixed string here can contradict the plan above it, and a reader who trusts the
     # summary over the body then draws the opposite conclusion (see DECISIONS 2026-09-05).
     n = core.MUTATIONS
-    noun = "removal" if prune else "change"
+    noun = "removal" if prune else "deletion" if retire else "change"
     count = f"no {noun}s" if n == 0 else f"{n} {noun}" + ("" if n == 1 else "s")
     verb = "planned" if core.DRY else "applied"
+    word = "prune" if prune else "retire" if retire else None
     if core.DRY:
-        label = "prune dry-run" if prune else "dry-run"
+        label = f"{word} dry-run" if word else "dry-run"
     else:
-        label = "prune" if prune else "apply"
+        label = word or "apply"
     print(f"\n{label} complete — {count} {verb}.")
+    if prune and core.STRAY:
+        # Roles the provisioner cannot remove (IP3): listed above, not counted, but never a clean run.
+        sys.exit(f"prune found {len(core.STRAY)} stray role(s) the provisioner cannot remove — "
+                 "a human removes them: " + "; ".join(core.STRAY))
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("project")
     ap.add_argument("--apply", action="store_true", help="apply changes (default: dry-run)")
-    ap.add_argument("--prune", action="store_true",
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--retire", action="store_true",
+                      help="the ONLY deleting mode: delete service accounts marked `retire: true` "
+                           "that are live and hold zero project roles (nothing if any marked SA fails); "
+                           "runs no add handler or pruner; --only is not valid with it")
+    mode.add_argument("--prune", action="store_true",
                     help="subtractive: REMOVE bindings/objects config no longer declares "
                          "(gcp: role bindings; kubernetes: managed netpol/rbac/ksa — never a namespace)")
     ap.add_argument("--only", help="single subsystem/pruner (add: %s; prune: %s)"
@@ -122,11 +166,13 @@ def main():
     args = ap.parse_args()
     if args.config_root:
         os.environ["PROVISION_CONFIG_ROOT"] = args.config_root
+    if args.retire and args.only:
+        ap.error("--only is invalid in retire mode (it runs exactly the retire pass)")
     valid = set(ALL_PRUNERS if args.prune else ALL_HANDLERS)
     if args.only and args.only not in valid:
         ap.error(f"--only {args.only!r} invalid for {'prune' if args.prune else 'add'} mode; "
                  f"choose from {sorted(valid)}")
-    run(args.project, apply=args.apply, only=args.only, prune=args.prune)
+    run(args.project, apply=args.apply, only=args.only, prune=args.prune, retire=args.retire)
 
 
 if __name__ == "__main__":
