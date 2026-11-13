@@ -213,6 +213,11 @@ or `deployed_by` or a `resource_roles.service_accounts` / `principals` target.
   the revoke: GCP cannot express "revoke but never grant"). `--prune` reports it as
   `stray`, does not count it as a removal, and exits non-zero at the end; `sa_audit` reports it
   too. A human removes it. The allow-list is read from the CONFIG root, not the engine checkout.
+  If that file is missing, `--prune` and the `--prune` audit fail; the plain add-mode audit only
+  prints a `::warning::` that the stray-role check was SKIPPED.
+- `--retire` is all-or-nothing across every target of a config: all targets are checked first,
+  and nothing is deleted if any marked SA in any target fails the check. A failed or EMPTY live
+  service-account list fails the audit; it never reads as "0 orphans".
 
 ## The engine (`engine/`)
 

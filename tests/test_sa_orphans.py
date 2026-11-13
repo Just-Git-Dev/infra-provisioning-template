@@ -86,7 +86,7 @@ def test_empty_live_list_with_declared_sas_is_an_error_not_zero_orphans():
     config_root()
     install(model_gout(live=["keeper", "api-run", "api-deployer", "old-bot"], list_returns=""))
     out, exc, _ = call(P._sa_audit_findings, CFG, PROJECT)
-    assert exc is not None and "empty" in str(exc.code), (exc, out)
+    assert exc is not None and "EMPTY" in str(exc.code), (exc, out)
     assert "0 orphan(s)" not in out, out
     # control: only retired SAs declared -> an empty list is plausible (all deleted), not an error
     install(model_gout(live=[], list_returns=""))

@@ -71,6 +71,33 @@ def config_root():
     return core.config_root()
 
 
+def _retire_all(project_key, targets, mode):
+    """Retire mode, ALL-OR-NOTHING ACROSS TARGETS: validate and check every target's retire set
+    first (reads only), and delete only if no target is blocked. A provider without RETIRERS is
+    skipped before preflight, so no add handler or pruner can run under --retire."""
+    checked, blocked = [], []
+    for target in targets:
+        provider = PROVIDERS[target["kind"]]
+        if not getattr(provider, "RETIRERS", None):
+            continue
+        validate = getattr(provider, "validate", None)
+        if validate:
+            validate(target)
+        ctx = provider.context(target)
+        print(f"{provider.label(project_key, target, ctx)}   mode: {mode}")
+        if not provider.preflight(ctx):
+            sys.exit(f"cannot access {target['kind']} target ({ctx}) — check auth/permissions")
+        for name in provider.RETIRE_CHECKS:
+            print()
+            plan, why = provider.RETIRE_CHECKS[name](target, ctx)
+            blocked += why
+            checked.append((provider, name, plan, ctx))
+    if blocked:
+        sys.exit("retire refused, nothing deleted (checked every target first): " + "; ".join(blocked))
+    for provider, name, plan, ctx in checked:
+        provider.RETIRE_DELETES[name](plan, ctx)
+
+
 def run(project_key, apply=False, only=None, prune=False, retire=False):
     core.DRY = not apply
     core.MUTATIONS = 0
@@ -82,18 +109,15 @@ def run(project_key, apply=False, only=None, prune=False, retire=False):
         cfg = yaml.safe_load(fh)
 
     mode = ("PRUNE " if prune else "RETIRE " if retire else "") + ("APPLY" if apply else "DRY-RUN")
-    for target in targets_of(cfg):
+    if retire:
+        _retire_all(project_key, targets_of(cfg), mode)
+    for target in ([] if retire else targets_of(cfg)):
         provider = PROVIDERS[target["kind"]]
-        # Retire mode runs ONLY a provider's RETIRERS; a provider without any is skipped
-        # before preflight (no add handler or pruner may run under --retire).
-        if retire and not getattr(provider, "RETIRERS", None):
-            continue
         validate = getattr(provider, "validate", None)
         if validate:
             validate(target)
         ctx = provider.context(target)
-        registry = (provider.RETIRERS if retire else provider.PRUNERS if prune
-                    else provider.HANDLERS)
+        registry = provider.PRUNERS if prune else provider.HANDLERS
         print(f"{provider.label(project_key, target, ctx)}   mode: {mode}")
         if not provider.preflight(ctx):
             sys.exit(f"cannot access {target['kind']} target ({ctx}) — check auth/permissions")

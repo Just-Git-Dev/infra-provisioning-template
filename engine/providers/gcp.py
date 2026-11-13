@@ -173,16 +173,22 @@ def provisioner_kept_roles(project=None):
     return roles
 
 
-def grantable_roles():
+def grantable_roles(strict=True):
     """Roles the provisioner may grant — and therefore REMOVE — at project level: the topology's
     `bootstrap/grantable-roles.txt`. Read from the CONFIG root (`core.config_root()`), never the
     engine checkout (`core.ROOT`): the engine is a SHA-pinned action and the two copies differ.
-    Fails loud when missing: an empty set would call every extra role 'stray' and an absent file
-    must not read as a clean run."""
+    Missing file: fatal when `strict` (--prune, where an empty set would call every extra role
+    'stray'); with `strict=False` (the report variant on every plain add-mode run, which other
+    template users reach on a minor bump) it is a loud ::warning:: and returns None — the stray
+    check is SKIPPED, and the warning says so, so it never reads as a clean result."""
     path = os.path.join(core.config_root(), "bootstrap", "grantable-roles.txt")
     if not os.path.exists(path):
-        sys.exit(f"{path} not found — the stray-role check needs the config root's "
-                 f"grantable-roles.txt (set --config-root / $PROVISION_CONFIG_ROOT)")
+        msg = (f"{path} not found — the stray-role check needs the config root's "
+               f"grantable-roles.txt (set --config-root / $PROVISION_CONFIG_ROOT)")
+        if strict:
+            sys.exit(msg)
+        print(f"::warning::sa_audit stray-role check SKIPPED: {msg}")
+        return None
     roles = set()
     with open(path) as fh:
         for line in fh:
@@ -1027,8 +1033,9 @@ def _declared_sa_grants(cfg, project, base):
     return out
 
 
-def _sa_audit_findings(cfg, project):
+def _sa_audit_findings(cfg, project, strict=True):
     """([finding, ...], examined) — reads one policy per declared SA; mutates nothing.
+    `strict=False` (the add-mode report) downgrades a missing grantable-roles.txt to a warning.
 
     A (role, member) binding is expected only when config declares that exact pair (owner ruling
     21: one writer per SA policy). There is no same-org allowance: a repo link nobody declared on a
@@ -1038,7 +1045,7 @@ def _sa_audit_findings(cfg, project):
     base = _wif_base(cfg, project)
     declared = _declared_sa_grants(cfg, project, base)
     findings, examined = [], 0
-    allow = None
+    allow, allow_read = None, False
     for sa in sas:
         email = sa_email(sa["name"], project)
         raw = gout(["iam", "service-accounts", "get-iam-policy", email, "--project", project,
@@ -1055,12 +1062,13 @@ def _sa_audit_findings(cfg, project):
         want_roles = set() if _retired(sa) else set(
             _expand_roles(sa.get("roles"), f"service_accounts: {sa['name']}"))
         extra = [r for r in sa_project_roles(project, email) if r not in want_roles]
-        if extra:
-            allow = grantable_roles() if allow is None else allow
-        for role in extra:
+        if extra and not allow_read:
+            allow, allow_read = grantable_roles(strict), True
+        for role in extra if allow is not None else []:
             if role not in allow:
                 c("err", f"STRAY on {sa['name']}: holds {role} (provisioner cannot remove — IP3)")
-                findings.append(f"{sa['name']}: stray project role {role} (a human removes it)")
+                findings.append(f"{sa['name']}: stray role (provisioner cannot remove — IP3) "
+                                f"{role}; a human removes it")
         want = declared.get(sa["name"], set())
         bad = []
         for b in json.loads(raw).get("bindings") or []:
@@ -1092,6 +1100,12 @@ def _orphan_findings(cfg, project):
         known.update(d for d in (sa.get("deployed_by") or []) if isinstance(d, str))
     listed = [e for e in gout(["iam", "service-accounts", "list", "--format=value(email)"],
                               project).splitlines() if e]
+    if not listed and any(not _retired(sa) for sa in sas):
+        # A project with declared, live SAs cannot list zero: that is a read that silently
+        # returned nothing (e.g. 'Listed 0 items'), and "0 orphans" from it would be a lie.
+        sys.exit(f"sa_audit: the live service-account list for {project} came back EMPTY while "
+                 f"config declares service accounts — the read is not trustworthy, so the orphan "
+                 f"check proves nothing")
     orphans = []
     for e in listed:
         name = e[:-len(suffix)] if e.endswith(suffix) else None
@@ -1100,13 +1114,18 @@ def _orphan_findings(cfg, project):
         orphans.append(name)
         c("err", f"ORPHAN {name}: live but not declared, not retire: true, not in any deployed_by")
     print(f"sa_audit: listed {len(listed)} live service account(s), {len(orphans)} orphan(s)")
-    return [f"{n}: orphan service account (declare it, or mark it retire: true)" for n in orphans]
+    return [f"orphan SA {n} (declare it, or mark it retire: true)" for n in orphans]
 
 
 def _warn_findings(findings, examined, tail):
+    orphans = [f for f in findings if f.startswith("orphan SA")]
+    strays = [f for f in findings if "stray role (provisioner cannot remove" in f]
     for f in findings:
-        print(f"::warning::sa_audit UNDECLARED {f}")
-    print(f"sa_audit: examined {examined} service account(s), {len(findings)} undeclared binding(s)"
+        # orphans and strays carry their own label; only a binding finding is "UNDECLARED"
+        print(f"::warning::sa_audit {'' if f in orphans or f in strays else 'UNDECLARED '}{f}")
+    n = len(findings) - len(orphans) - len(strays)
+    print(f"sa_audit: examined {examined} service account(s), {n} undeclared binding(s)"
+          + (f", {len(orphans)} orphan SA(s), {len(strays)} stray role(s)" if orphans or strays else "")
           + (f" — {tail}" if findings else ""))
 
 
@@ -1115,7 +1134,7 @@ def report_service_accounts(cfg, project):
     (dry-run and apply). Reports `::warning::` lines plus a summary; never fails the run, never
     removes anything. The failing variant is `audit_service_accounts` (under --prune)."""
     print("sa_audit:")
-    findings, examined = _sa_audit_findings(cfg, project)
+    findings, examined = _sa_audit_findings(cfg, project, strict=False)
     _warn_findings(findings, examined, "a human reviews them; `--prune` fails on them")
 
 
@@ -1132,7 +1151,13 @@ def audit_service_accounts(cfg, project):
     if findings:
         c("err", "not removed by design — a binding is changed by a human, "
                  "not by the identity that benefits from it")
-        sys.exit("service account audit FAILED, undeclared bindings: " + "; ".join(findings))
+        other = [f for f in findings
+                 if f.startswith("orphan SA") or "stray role (provisioner cannot remove" in f]
+        bindings = [f for f in findings if f not in other]
+        sys.exit("service account audit FAILED" + (", undeclared bindings: " + "; ".join(bindings)
+                                                   if bindings else "")
+                 + (": " if other and not bindings else "; " if other else "")
+                 + "; ".join(other))
     if any(not _retired(sa) for sa in cfg.get("service_accounts") or []) and examined == 0:
         sys.exit("service account audit examined 0 service accounts — nothing readable, "
                  "so it proves nothing")
@@ -1300,16 +1325,16 @@ HANDLERS["secret_audit"] = report_secret_policies
 # `--retire` runs this registry and nothing else: no add handler, no pruner. Deleting an identity
 # is not reversible past 30 days, so it is its own mode with its own gate, and no add or prune
 # path ever emits `service-accounts delete` (tests/test_retire.py scans every argv).
-def retire_service_accounts(cfg, project):
-    """Delete every SA marked `retire: true` that is LIVE and holds ZERO project roles — and
-    delete NOTHING if any marked SA fails that check (all-or-nothing, so a half-retired set is
-    never left behind). Dry-run counts the deletions and withholds them (core.undo)."""
+def retire_check(cfg, project):
+    """(plan, blocked) for one target: READS ONLY, mutates nothing. plan = [(name, email)] that are
+    marked, live and role-less; blocked = reasons a marked SA may not be deleted. The CLI runs
+    this for EVERY target first and deletes only if no target is blocked (all-or-nothing)."""
     print("retire service_accounts:")
     validate_retired(cfg)
     marked = [sa for sa in cfg.get("service_accounts") or [] if _retired(sa)]
     if not marked:
         c("ok", "no service accounts marked retire: true")
-        return
+        return [], []
     anchor = provisioner_identity(cfg, project)[0]
     plan, blocked = [], []
     for sa in marked:
@@ -1322,16 +1347,33 @@ def retire_service_accounts(cfg, project):
         roles = sa_project_roles(project, email)
         if roles:
             c("err", f"{name}: still holds {', '.join(roles)} — run --prune first")
-            blocked.append(f"{name} holds {', '.join(roles)}")
+            blocked.append(f"{name}@{project} holds {', '.join(roles)}")
         else:
             plan.append((name, email))
-    if blocked:
-        sys.exit("retire refused, nothing deleted: " + "; ".join(blocked))
+    return plan, blocked
+
+
+def retire_delete(plan, project):
+    """Delete a checked plan — the only place a service account is deleted."""
     for name, email in plan:
         undo(["iam", "service-accounts", "delete", email, "--quiet"], project, f"delete sa {email}")
 
 
+def retire_service_accounts(cfg, project):
+    """Delete every SA marked `retire: true` that is LIVE and holds ZERO project roles — and
+    delete NOTHING if any marked SA fails that check (all-or-nothing, so a half-retired set is
+    never left behind). Dry-run counts the deletions and withholds them (core.undo). Single-
+    target form; the CLI uses retire_check/retire_delete to extend the guarantee across targets."""
+    plan, blocked = retire_check(cfg, project)
+    if blocked:
+        sys.exit("retire refused, nothing deleted: " + "; ".join(blocked))
+    retire_delete(plan, project)
+
+
 RETIRERS = {"service_accounts": retire_service_accounts}
+# The two halves of a retirer, for the CLI's all-or-nothing-across-targets pass.
+RETIRE_CHECKS = {"service_accounts": retire_check}
+RETIRE_DELETES = {"service_accounts": retire_delete}
 
 
 # ── provider contract (used by the multi-target CLI loop, ADR-003 §5) ─────────
