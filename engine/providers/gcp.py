@@ -125,6 +125,15 @@ def sa_user_members(project, email):
     return [m for m in out.splitlines() if m]
 
 
+def sa_wif_members(project, email):
+    """All members holding roles/iam.workloadIdentityUser ON this SA (who may impersonate it via WIF)."""
+    out = gout(["iam", "service-accounts", "get-iam-policy", email, "--project", project,
+                "--flatten=bindings[].members",
+                "--filter=bindings.role=roles/iam.workloadIdentityUser",
+                "--format=value(bindings.members)"])
+    return [m for m in out.splitlines() if m]
+
+
 # Every resource this engine creates says WHO manages it. Without this a console reader
 # cannot tell a config-managed SA from a hand-made one, and edits it by hand — which the
 # next apply silently reverts. Audited 2026-08-30: provenance was determinable for zero
@@ -1305,9 +1314,46 @@ def prune_act_as(cfg, project):
         c("ok", "no extra act_as bindings")
 
 
+def prune_wif(cfg, project):
+    """Remove roles/iam.workloadIdentityUser members config no longer declares, from a DECLARED SA,
+    but only members of THIS project's own WIF pool (the prefix is the ownership proof). Any other
+    member (another pool or project, a user, a service account) is "not ours, kept". A
+    `retire: true` SA declares no members. The project number is the validated `_project_number`,
+    never `_wif_base`'s unvalidated fallback: a wrong prefix would mis-classify ownership."""
+    print("prune wif:")
+    pool = (cfg.get("wif") or {}).get("pool")
+    if not pool:
+        c("skip", "no wif.pool configured")
+        return
+    num = _project_number(project)
+    prefix = f"//iam.googleapis.com/projects/{num}/locations/global/workloadIdentityPools/{pool}/"
+    declared = _declared_sa_grants({**cfg, "project": {**(cfg.get("project") or {}),
+                                                       "gcp_number": num}},
+                                   project, prefix)
+    wif_user = "roles/iam.workloadIdentityUser"
+    extra = False
+    for sa in cfg.get("service_accounts", []):
+        email = sa_email(sa["name"], project)
+        want = set() if _retired(sa) else {m for r, m in declared.get(sa["name"], ()) if r == wif_user}
+        for member in sa_wif_members(project, email):
+            if member in want:
+                continue
+            scheme, _, rest = member.partition(":")
+            if scheme not in ("principal", "principalSet") or not rest.startswith(prefix):
+                c("skip", f"{sa['name']}: {member}: not ours, kept")
+                continue
+            extra = True
+            undo(["iam", "service-accounts", "remove-iam-policy-binding", email, "--project", project,
+                  f"--role={wif_user}", f"--member={member}"],
+                 project, f"unbind wif {member} → {sa['name']}")
+    if not extra:
+        c("ok", "no extra wif bindings")
+
+
 PRUNERS = {
     "service_accounts": prune_service_accounts,
     "act_as": prune_act_as,
+    "wif": prune_wif,
     "resource_roles": prune_resource_roles,
     "principals": prune_principals,
     "provisioner": prune_provisioner,

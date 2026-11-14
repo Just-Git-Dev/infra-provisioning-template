@@ -107,7 +107,8 @@ def test_handlers_are_access_only():
     # scope line is unmoved; see DECISIONS 2026-10-20 and tests/test_repo_links.py).
     assert set(P.HANDLERS) == {"service_accounts", "act_as", "resource_roles", "principals",
                                "wif", "sa_audit", "secret_audit"}
-    assert set(P.PRUNERS) == {"service_accounts", "act_as", "resource_roles", "principals",
+    # `wif` (2026-11-14) prunes only this project's own-pool workloadIdentityUser members.
+    assert set(P.PRUNERS) == {"service_accounts", "act_as", "wif", "resource_roles", "principals",
                               "provisioner", "sa_audit", "secret_audit"}
 
 
