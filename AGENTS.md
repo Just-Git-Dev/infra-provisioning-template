@@ -34,6 +34,17 @@ which pins a **full commit SHA**, not `@v1`.
   single SA) and deliberately does NOT create one — an absent target fails loud. Adding a
   handler that CREATES an app-owned resource crosses the ADR-001 line and needs a decision,
   not just a commit; `tests/test_engine.py::test_handlers_are_access_only` guards the set.
+- **`prune_wif` owns `workloadIdentityUser`; the own-pool prefix is the ownership proof.** It
+  removes a member only from a DECLARED SA, only if the member starts with THIS project's pool
+  prefix (`principal[Set]://iam.googleapis.com/projects/<num>/locations/global/workloadIdentityPools/<pool>/`),
+  and only if config no longer declares it. Any other member is "not ours, kept". `retire: true`
+  declares no members. No `wif.pool` -> skip. `sa_audit` stays report-only.
+- **`human_managed_roles` are declared, never granted.** `[{role, condition: {title, expression}}]`
+  per SA; the engine never adds or removes them and `grantable-roles.txt` stays unchanged. The
+  audit treats an exact match as ok, a different condition as `human-managed binding drifted`,
+  the same role held unconditionally as stray, and a declared-but-absent entry as `human-managed
+  binding missing` (fails the audit). `prune service_accounts` counts such a role neither as extra
+  nor as stray.
 - **One writer per service-account policy** (owner ruling 21). Every SA declared in config is
   written ONLY by this engine; the project's own automation writes only `<deployable>-deployer`
   SAs. `sa_audit` therefore has no same-org allowance: on a declared SA only declared
