@@ -258,11 +258,19 @@ plan time. `grantable-roles.txt` is unchanged, so the provisioner gains no power
 
 - `sa_audit`: a live binding matching role + member + condition title + expression exactly prints
   `ok human-managed <role> (<title>)`. The same role under a different condition is a finding
-  `human-managed binding drifted`. The same role held UNconditionally is still a stray (the
-  declaration covers only the conditional form). A declared entry absent live is a finding
-  `human-managed binding missing`, and it **fails the audit** (config is the source of truth).
-- `--prune service_accounts`: a role whose ONLY live bindings for the SA match a human-managed
-  entry is neither extra nor stray, and the engine never calls add or remove for it.
+  `human-managed binding drifted`, and so is ANY other live conditional binding of a
+  human-managed role that is not an exact declared entry, even when the exact one is also live
+  (a wider `startsWith(...)` binding cannot hide behind it). The same role held UNconditionally
+  is still a stray (the declaration covers only the conditional form). A declared entry absent
+  live is a finding `human-managed binding missing`, and it **fails the audit** (config is the
+  source of truth).
+- A role listed in `human_managed_roles` that the same SA also wants (`roles`, or a capability's
+  expansion) exits at plan time: ensure would bind it unconditionally.
+- `--prune service_accounts`: the engine only ever writes UNconditional bindings, so it only
+  removes those. Every live CONDITIONAL binding (declared human-managed, drifted, or any other
+  role) is never planned for removal; it prints `conditional binding <role> (<title>) not
+  engine-owned, kept`. A role held both conditionally and unconditionally plans at most ONE
+  unconditional unbind, and only if an unconditional binding really exists.
 
 ## The engine (`engine/`)
 

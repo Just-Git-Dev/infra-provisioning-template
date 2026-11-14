@@ -41,10 +41,12 @@ which pins a **full commit SHA**, not `@v1`.
   declares no members. No `wif.pool` -> skip. `sa_audit` stays report-only.
 - **`human_managed_roles` are declared, never granted.** `[{role, condition: {title, expression}}]`
   per SA; the engine never adds or removes them and `grantable-roles.txt` stays unchanged. The
-  audit treats an exact match as ok, a different condition as `human-managed binding drifted`,
-  the same role held unconditionally as stray, and a declared-but-absent entry as `human-managed
-  binding missing` (fails the audit). `prune service_accounts` counts such a role neither as extra
-  nor as stray.
+  audit treats an exact match as ok, ANY other live conditional binding of that role (also beside
+  the exact one) as `human-managed binding drifted`, the same role held unconditionally as stray,
+  and a declared-but-absent entry as `human-managed binding missing` (fails the audit). A role
+  both human-managed and wanted exits at plan time. `prune service_accounts` removes only
+  UNconditional bindings (deduped to one unbind per role); a conditional binding of any role is
+  reported `not engine-owned, kept`, never planned for removal.
 - **One writer per service-account policy** (owner ruling 21). Every SA declared in config is
   written ONLY by this engine; the project's own automation writes only `<deployable>-deployer`
   SAs. `sa_audit` therefore has no same-org allowance: on a declared SA only declared

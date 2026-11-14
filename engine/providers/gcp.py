@@ -587,8 +587,21 @@ def _sa_roles(cfg, caps=None):
     caps = capabilities() if caps is None else caps
     for sa in cfg.get("service_accounts", []):
         _human_managed(sa)
-    return [(sa, _expand_roles(sa.get("roles"), f"service_accounts: {sa['name']}", caps))
-            for sa in cfg.get("service_accounts", []) if not _retired(sa)]
+    out = [(sa, _expand_roles(sa.get("roles"), f"service_accounts: {sa['name']}", caps))
+           for sa in cfg.get("service_accounts", []) if not _retired(sa)]
+    for sa, roles in out:
+        _check_hm_overlap(sa, roles)
+    return out
+
+
+def _check_hm_overlap(sa, want):
+    """Exit if a role is both human-managed and wanted: ensure would bind it UNconditionally
+    (`--condition=None`), which is exactly what a human-managed conditional role must never get."""
+    both = sorted({h[0] for h in _human_managed(sa)} & set(want))
+    if both:
+        sys.exit(f"service account {sa.get('name')!r}: human_managed_roles overlaps roles "
+                 f"(or a capability) it also wants: {both}; the engine would bind it "
+                 f"unconditionally. Remove it from one of the two")
 
 
 def _human_managed(sa):
@@ -894,14 +907,15 @@ def prune_service_accounts(cfg, project):
         # unbinds exactly what the config just asked for. A retired SA wants NOTHING.
         want = set() if _retired(sa) else set(
             _expand_roles(sa.get("roles"), f"service_accounts: {sa['name']}"))
-        live = sa_project_roles(project, email)
-        hm = _human_managed(sa)
-        # A role whose ONLY live bindings are declared human-managed is neither extra nor stray.
-        held = {}
-        for role, title, expr in (sa_project_bindings(project, email) if hm else ()):
-            held.setdefault(role, set()).add((role, title, expr))
-        kept = {r for r, bs in held.items() if bs <= hm}
-        extra = [r for r in live if r not in want and r not in kept]
+        _check_hm_overlap(sa, want)
+        # The engine only ever writes UNconditional bindings, so it only removes those. A
+        # conditional binding (declared human-managed, drifted, or any other role) is reported
+        # and kept; a role held both ways plans at most ONE unconditional unbind.
+        bindings = sorted(sa_project_bindings(project, email), key=lambda b: tuple(map(str, b)))
+        for role, title, expr in bindings:
+            if expr is not None:
+                c("skip", f"{name}: conditional binding {role} ({title}) not engine-owned, kept")
+        extra = sorted({r for r, _, expr in bindings if expr is None and r not in want})
         if not extra:
             c("ok", f"{name}: no extra roles")
             continue
@@ -1119,6 +1133,7 @@ def _sa_audit_findings(cfg, project, strict=True):
         # provisioner CANNOT remove are findings here; a removable extra is the pruner's work.
         want_roles = set() if _retired(sa) else set(
             _expand_roles(sa.get("roles"), f"service_accounts: {sa['name']}"))
+        _check_hm_overlap(sa, want_roles)
         hm = _human_managed(sa)
         held = {}
         for b in (sa_project_bindings(project, email) if hm else ()):
@@ -1146,6 +1161,14 @@ def _sa_audit_findings(cfg, project, strict=True):
             else:
                 c("err", f"{sa['name']}: human-managed binding missing: {role} ({title})")
                 findings.append(f"{sa['name']}: human-managed binding missing {role} ({title})")
+        # ANY other live conditional binding of a human-managed role is drift, even beside the
+        # exact declared one (a wider condition would otherwise hide behind it).
+        for role in sorted({h[0] for h in hm}):
+            for b in sorted(held.get(role, ()), key=lambda b: tuple(map(str, b))):
+                if b[1] is not None and b not in hm:
+                    c("err", f"{sa['name']}: human-managed binding drifted: {role} is also held "
+                             f"under an undeclared condition ({b[1]})")
+                    findings.append(f"{sa['name']}: human-managed binding drifted {role} ({b[1]})")
         want = declared.get(sa["name"], set())
         bad = []
         for b in json.loads(raw).get("bindings") or []:

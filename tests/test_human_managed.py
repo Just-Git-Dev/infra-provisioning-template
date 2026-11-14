@@ -153,5 +153,55 @@ def test_t13b_declaring_it_does_not_need_the_role_in_grantable_roles():
     assert exc is None and ret[0] == [], (exc, ret, out)
 
 
+WIDER = (ROLE, "wider", 'resource.name.startsWith("projects/42/secrets/")')
+
+
+def test_t14_exact_binding_plus_a_wider_conditional_binding_is_drift():
+    # review fix 1: the exact declared binding is live, AND another conditional binding of the same
+    # role (a wider scope) exists: that second one is not declared, so it is drift, never "covered".
+    _setup([(ROLE, TITLE, EXPR), WIDER], allow=(ROLE,))
+    out, exc, ret = call(P._sa_audit_findings, _cfg(), PROJECT)
+    assert exc is None, (exc, out)
+    findings, _ = ret
+    assert any("human-managed binding drifted" in f and ROLE in f and "wider" in f
+               for f in findings), (findings, out)
+    assert f"ok human-managed {ROLE} ({TITLE})" in out, out      # the exact one is still recognised
+
+
+def test_t15_overlap_of_human_managed_and_wanted_role_exits_at_plan_time():
+    # review fix 2: ensure would bind the role with --condition=None, so config is refused up front.
+    for sa_roles in (["secretmanager.admin"], [ROLE]):
+        cfg = {"service_accounts": [{"name": "releaser", "roles": sa_roles,
+                                     "human_managed_roles": [HM]}]}
+        for fn in (P.ensure_service_accounts, P.prune_service_accounts, P._sa_audit_findings):
+            rec = _setup([], allow=(ROLE,), dry=False)
+            out, exc, _ = call(fn, cfg, PROJECT)
+            assert exc is not None and ROLE in str(exc.code) and "human_managed_roles" in str(exc.code), \
+                (sa_roles, fn.__name__, exc, out)
+            assert _role_writes(rec) == [], rec.calls
+
+
+def test_t16_prune_never_plans_removal_of_a_conditional_binding():
+    # review fix 3: the engine only writes unconditional bindings, so it removes only those.
+    for live in ([(ROLE, TITLE, EXPR), WIDER],                    # declared + drifted wider
+                 [(ROLE, TITLE, 'resource.name.startsWith("projects/42/secrets/other-")')],
+                 [("roles/run.developer", "t", "true")]):          # any other role, conditional
+        rec = _setup(live, allow=(ROLE, "roles/run.developer"))
+        out, exc, _ = call(P.prune_service_accounts, _cfg(), PROJECT)
+        assert exc is None, (exc, out)
+        assert "would unbind" not in out and core.MUTATIONS == 0 and rec.calls == [], (live, out)
+    assert "conditional binding" in out and "not engine-owned, kept" in out, out
+    assert "roles/run.developer" in out and "(t)" in out, out
+
+
+def test_t17_role_held_conditionally_and_unconditionally_plans_one_unbind():
+    for live in ([(ROLE, TITLE, EXPR), (ROLE, None, None)],
+                 [(ROLE, None, None), (ROLE, None, None), (ROLE, "wider", "true")]):
+        _setup(live, allow=(ROLE,))
+        out, exc, _ = call(P.prune_service_accounts, _cfg(), PROJECT)
+        assert exc is None, (exc, out)
+        assert out.count("would unbind") == 1 and core.MUTATIONS == 1, (live, out)
+
+
 if __name__ == "__main__":
     runner(globals())

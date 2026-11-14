@@ -10,6 +10,7 @@ app-owned and have no handlers here (see DECISIONS 2026-07-01 + ADR-001). The
 core/provider split is ADR-003.
 """
 import io
+import json
 import os
 import sys
 from contextlib import redirect_stdout
@@ -24,7 +25,18 @@ _ORIG_GOUT = P.gout   # drive() monkeypatches P.gout; keep the real one for gout
 def drive(handler, cfg, gout_map, project="p"):
     """Run a handler in dry-run with gout stubbed from gout_map(args)->str."""
     core.DRY = True   # the dry-run gate lives in core (shared across providers)
-    P.gout = lambda args, project=None: gout_map(args)
+
+    def gout(args, project=None):
+        if args[:2] == ["projects", "get-iam-policy"] and "--format=json" in args:
+            # the JSON read keeps conditions; serve the flat role list as UNconditional bindings
+            members = [f"serviceAccount:{sa['name']}@{args[2]}.iam.gserviceaccount.com"
+                       for sa in cfg.get("service_accounts", [])]
+            flat = gout_map([a for a in args if a != "--format=json"]
+                            + ["--format=value(bindings.role)"])
+            return json.dumps({"bindings": [{"role": r, "members": members}
+                                            for r in flat.splitlines() if r]})
+        return gout_map(args)
+    P.gout = gout
     P.gcloud = lambda *a, **k: (_ for _ in ()).throw(AssertionError("mutation in dry-run"))
     buf = io.StringIO()
     with redirect_stdout(buf):
