@@ -51,6 +51,9 @@ def model_gout(live=(), roles=None, extra_listed=(), list_returns=None, projects
             return "x\t" + P._described("") if args[3] in by_email else ""
         if args[:2] == ["iam", "service-accounts"] and args[2] == "get-iam-policy":
             return json.dumps({"bindings": []}) if args[3] in by_email else ""
+        if args[:2] == ["projects", "get-iam-policy"] and "--format=json" in args:
+            return json.dumps({"bindings": [{"role": r, "members": [f"serviceAccount:{em}"]}
+                                            for em, n in by_email.items() for r in roles_p.get(n, [])]})
         if args[:2] == ["projects", "get-iam-policy"]:
             for em, n in by_email.items():
                 if f"bindings.members=serviceAccount:{em}" in j:

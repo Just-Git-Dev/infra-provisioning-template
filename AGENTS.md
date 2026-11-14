@@ -34,6 +34,23 @@ which pins a **full commit SHA**, not `@v1`.
   single SA) and deliberately does NOT create one — an absent target fails loud. Adding a
   handler that CREATES an app-owned resource crosses the ADR-001 line and needs a decision,
   not just a commit; `tests/test_engine.py::test_handlers_are_access_only` guards the set.
+- **`prune_wif` owns `workloadIdentityUser`; the own-pool prefix is the ownership proof.** It
+  removes a member only from a DECLARED SA, only if the member starts with THIS project's pool
+  prefix (`principal[Set]://iam.googleapis.com/projects/<num>/locations/global/workloadIdentityPools/<pool>/`),
+  and only if config no longer declares it. ANY undeclared own-pool member goes, including types
+  `ensure_wif` never writes (`attribute.repository_owner`, `/*`, `subject/...`): owner ruling.
+  Any other member is "not ours, kept"; a CONDITIONAL binding is reported and kept. `retire: true`
+  declares no members (and runs `validate_retired`). No `wif.pool` -> skip. The validated
+  `_project_number` wins over `project.gcp_number`. Prints `examined N SAs, M wif members` every
+  run. `sa_audit` stays report-only.
+- **`human_managed_roles` are declared, never granted.** `[{role, condition: {title, expression}}]`
+  per SA; the engine never adds or removes them and `grantable-roles.txt` stays unchanged. The
+  audit treats an exact match as ok, ANY other live conditional binding of that role (also beside
+  the exact one) as `human-managed binding drifted`, the same role held unconditionally as stray,
+  and a declared-but-absent entry as `human-managed binding missing` (fails the audit). A role
+  both human-managed and wanted exits at plan time. `prune service_accounts` removes only
+  UNconditional bindings (deduped to one unbind per role); a conditional binding of any role is
+  reported `not engine-owned, kept`, never planned for removal.
 - **One writer per service-account policy** (owner ruling 21). Every SA declared in config is
   written ONLY by this engine; the project's own automation writes only `<deployable>-deployer`
   SAs. `sa_audit` therefore has no same-org allowance: on a declared SA only declared

@@ -73,7 +73,7 @@ kubectl for k8s targets); the action just runs the reconcile.
 | `project` | — (required) | folder under `projects/` |
 | `apply` | `false` | apply changes (default: dry-run/plan) |
 | `prune` | `false` | subtractive reconcile — remove bindings/objects config no longer declares |
-| `only` | `''` | run a single subsystem/pruner |
+| `only` | `''` | run a single subsystem/pruner (prune mode adds `wif`, see below) |
 | `retire` | `false` | the ONE deleting mode: delete service accounts marked `retire: true` (see below). Mutually exclusive with `prune`; `only` is invalid with it |
 | `config-root` | `${{ github.workspace }}` | root holding `projects/<key>/config.yaml` |
 
@@ -219,6 +219,66 @@ or `deployed_by` or a `resource_roles.service_accounts` / `principals` target.
   and nothing is deleted if any marked SA in any target fails the check. A failed or EMPTY live
   service-account list fails the audit; it never reads as "0 orphans".
 
+### `--prune --only wif` — remove WIF members config no longer declares
+
+`prune_wif` removes a `roles/iam.workloadIdentityUser` member from a service account only when
+ALL of these hold: the SA is declared in this config; the member comes from THIS project's own
+WIF pool (`principalSet:` or `principal:` followed by
+`//iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<pool>/`); and
+config no longer declares that member (`wif_repos` / `wif_subjects`). The own-pool prefix is the
+ownership proof: ANY undeclared member of this project's own pool is removed, including member
+types `ensure` never writes (`attribute.repository_owner/...`, `/*`, `subject/...`). The pool is
+treated as engine territory; that is an owner ruling, not a claim that the engine wrote each one.
+
+Everything else is reported `not ours, kept` and left alone: a member of another pool, a `user:`,
+a `serviceAccount:`, and any SA the config does not declare. Only UNconditional bindings are
+removed: a member under a CONDITIONAL `workloadIdentityUser` binding is reported
+`conditional binding (<title>) not engine-owned, kept`. A `retire: true` SA declares no
+members, so its own-pool members are removed (a malformed tombstone exits first, via the same
+`validate_retired` guard as `prune service_accounts`). With no `wif.pool` in the config the
+pruner reports `skip`. The project number is read with `_project_number` (read-only, fails loudly
+on a non-number); it wins over any `project.gcp_number` in the config. Every run prints
+`examined N SAs, M wif members`, also when nothing is extra. A dry-run prints
+`would unbind wif <member> → <sa>` and counts it in the trailer; with nothing
+extra it prints `ok no extra wif bindings`. A plain `--prune` runs it too. The nightly `sa_audit`
+stays report-only.
+
+Example: narrowing `wif_repos: [org/app]` to `wif_subjects: [{repo: org/app, environment: ops}]`
+leaves the old repo-wide `principalSet` live until `--prune --only wif` removes it.
+
+### `human_managed_roles` — a conditional project role a human owns
+
+```yaml
+service_accounts:
+  - name: releaser
+    human_managed_roles:
+      - role: roles/secretmanager.admin
+        condition:
+          title: base-secrets-only
+          expression: resource.name.startsWith("projects/42/secrets/base-")
+```
+
+The engine **never grants or removes** these. It only DECLARES them so the audit and the pruner
+stop calling a human-approved conditional binding a stray. `role` must be a qualified string;
+`condition.title` and `condition.expression` must be non-empty strings; anything else exits at
+plan time. `grantable-roles.txt` is unchanged, so the provisioner gains no power.
+
+- `sa_audit`: a live binding matching role + member + condition title + expression exactly prints
+  `ok human-managed <role> (<title>)`. The same role under a different condition is a finding
+  `human-managed binding drifted`, and so is ANY other live conditional binding of a
+  human-managed role that is not an exact declared entry, even when the exact one is also live
+  (a wider `startsWith(...)` binding cannot hide behind it). The same role held UNconditionally
+  is still a stray (the declaration covers only the conditional form). A declared entry absent
+  live is a finding `human-managed binding missing`, and it **fails the audit** (config is the
+  source of truth).
+- A role listed in `human_managed_roles` that the same SA also wants (`roles`, or a capability's
+  expansion) exits at plan time: ensure would bind it unconditionally.
+- `--prune service_accounts`: the engine only ever writes UNconditional bindings, so it only
+  removes those. Every live CONDITIONAL binding (declared human-managed, drifted, or any other
+  role) is never planned for removal; it prints `conditional binding <role> (<title>) not
+  engine-owned, kept`. A role held both conditionally and unconditionally plans at most ONE
+  unconditional unbind, and only if an unconditional binding really exists.
+
 ## The engine (`engine/`)
 
 - `core.py` — provider-agnostic reconcile discipline: dry-run gate, `do()`/`undo()`,
@@ -236,6 +296,7 @@ python3 engine/provision.py <key>                 # dry-run all subsystems (uses
 python3 engine/provision.py <key> --apply         # apply
 python3 engine/provision.py <key> --only wif      # one subsystem
 python3 engine/provision.py <key> --prune         # plan removals (subtractive)
+python3 engine/provision.py <key> --prune --only wif   # remove own-pool WIF members config dropped
 python3 engine/provision.py <key> --retire        # plan deletion of `retire: true` SAs
 python3 tests/test_engine.py && python3 tests/test_kubernetes.py   # seams stubbed; no cloud
 ```
@@ -296,7 +357,8 @@ Edit the `PROVISIONER_REPO` / `PROJECTS` placeholders (or set `PROVISIONER_REPO`
   `retire: true`, live, and holding zero project roles; no add or prune path emits
   `service-accounts delete` (a test scans every argv). The separation is in code, not in identity:
   the identity running the engine may still hold delete permission.
-- **Prune is opt-in and conservative:** k8s prune is label-scoped and never deletes a Namespace
+- **Prune is opt-in and conservative:** the WIF pruner removes only members of this project's own
+  pool; k8s prune is label-scoped and never deletes a Namespace
   or ResourceQuota.
 
 ## License

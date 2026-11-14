@@ -5,8 +5,9 @@ the alternatives were. Newest first.
 
 ## Index
 
-24 entries. Newest first.
+25 entries. Newest first.
 
+- [2026-11-14 — prune_wif owns workloadIdentityUser; human_managed_roles are declared, never granted](#2026-11-14--prune_wif-owns-workloadidentityuser-human_managed_roles-are-declared-never-granted)
 - [2026-11-13 — SA retirement: `retire: true`, a `--retire` deleter mode, orphan and stray-role detection](#2026-11-13--sa-retirement-retire-true-a---retire-deleter-mode-orphan-and-stray-role-detection)
 - [2026-10-21 — Dry-run verifies a custom role exists before planning its binding](#2026-10-21--dry-run-verifies-a-custom-role-exists-before-planning-its-binding)
 - [2026-10-20 — secret_audit: detect-only audit of the policy of each <d>-env secret](#2026-10-20--secret_audit-detect-only-audit-of-the-policy-of-each-d-env-secret)
@@ -31,6 +32,16 @@ the alternatives were. Newest first.
 - [2026-08-21 — caller inputs move to `env:`; CI grows actionlint and lints `action.yml` itself](#2026-08-21--caller-inputs-move-to-env-ci-grows-actionlint-and-lints-actionyml-itself)
 - [2026-08-20 — SHA-pin this repo's own actions and enforce it in CI](#2026-08-20--sha-pin-this-repos-own-actions-and-enforce-it-in-ci)
 - [2026-08-20 — port the two mutation-path engine fixes from the consumer; release v1.0.1](#2026-08-20--port-the-two-mutation-path-engine-fixes-from-the-consumer-release-v101)
+
+## 2026-11-14 — prune_wif owns workloadIdentityUser; human_managed_roles are declared, never granted
+
+**Decision.** Two engine features, both owner rulings of 2026-11-14.
+
+**1. `prune_wif` owns `roles/iam.workloadIdentityUser`; the own-pool prefix is the ownership proof.** `--prune --only wif` (and a plain `--prune`) removes a member from a declared SA only if the member is from this project's own WIF pool (`principalSet:` or `principal:` + `//iam.googleapis.com/projects/<num>/locations/global/workloadIdentityPools/<pool>/`) and config no longer declares it. Everything else (another pool, `user:`, `serviceAccount:`, an undeclared SA) is reported "not ours, kept". A `retire: true` SA declares no members. No `wif.pool` means skip. `sa_audit` stays report-only. Why: narrowing `wif_repos` to `wif_subjects` left the repo-wide principalSet live because nothing pruned it, and `--only wif` was rejected in prune mode. Owner ruling: the own pool is engine territory, so ANY undeclared member of it is removed, including member types `ensure_wif` never writes (`attribute.repository_owner`, `/*`, `subject/...`); the prefix proves pool ownership, not authorship of each member. A looser rule (any workloadIdentityUser member) could remove a human's or another pool's grant. Review rulings, same day: only UNconditional bindings are removed (a conditional one is reported and kept); a run prints `examined N SAs, M wif members`; the validated `_project_number` wins over `project.gcp_number` and a non-number exits; `validate_retired` runs first, as in `prune service_accounts` (same guard, harmless here).
+
+**2. `human_managed_roles`: declared, never granted.** Per-SA list of `{role, condition: {title, expression}}`. The engine neither adds nor removes it; `sa_audit` and `prune service_accounts` accept an exact match (role + member + title + expression) instead of calling it a stray. A different condition, or any other live conditional binding of the role even beside the exact one, is `human-managed binding drifted`; the same role held unconditionally stays stray; a role both human-managed and wanted exits at plan time (ensure would bind it with `--condition=None`); `prune service_accounts` removes only UNconditional bindings (the only kind the engine writes), reports any conditional one as "not engine-owned, kept", and plans at most one unbind per role (review rulings, 2026-11-14); a declared entry absent live is `human-managed binding missing` and FAILS the audit (config is the source of truth, so a vanished binding is drift, not silence). Why not `grantable-roles.txt`: adding the role there would give the provisioner the power to grant it (and to grant it unconditionally). An IAM condition is human-approved scope, so a human keeps ownership and the engine only recognises it.
+
+**Alternatives rejected.** Letting the engine grant conditional bindings; widening the allow-list; a prune that removes any workloadIdentityUser member; ignoring a missing human-managed binding.
 
 ## 2026-11-13 — SA retirement: `retire: true`, a `--retire` deleter mode, orphan and stray-role detection
 
