@@ -226,13 +226,20 @@ ALL of these hold: the SA is declared in this config; the member comes from THIS
 WIF pool (`principalSet:` or `principal:` followed by
 `//iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<pool>/`); and
 config no longer declares that member (`wif_repos` / `wif_subjects`). The own-pool prefix is the
-ownership proof: the engine only ever removes what it could have written.
+ownership proof: ANY undeclared member of this project's own pool is removed, including member
+types `ensure` never writes (`attribute.repository_owner/...`, `/*`, `subject/...`). The pool is
+treated as engine territory; that is an owner ruling, not a claim that the engine wrote each one.
 
 Everything else is reported `not ours, kept` and left alone: a member of another pool, a `user:`,
-a `serviceAccount:`, and any SA the config does not declare. A `retire: true` SA declares no
-members, so its own-pool members are removed. With no `wif.pool` in the config the pruner
-reports `skip`. The project number is read with `_project_number` (read-only, fails loudly).
-A dry-run prints `would unbind wif <member> → <sa>` and counts it in the trailer; with nothing
+a `serviceAccount:`, and any SA the config does not declare. Only UNconditional bindings are
+removed: a member under a CONDITIONAL `workloadIdentityUser` binding is reported
+`conditional binding (<title>) not engine-owned, kept`. A `retire: true` SA declares no
+members, so its own-pool members are removed (a malformed tombstone exits first, via the same
+`validate_retired` guard as `prune service_accounts`). With no `wif.pool` in the config the
+pruner reports `skip`. The project number is read with `_project_number` (read-only, fails loudly
+on a non-number); it wins over any `project.gcp_number` in the config. Every run prints
+`examined N SAs, M wif members`, also when nothing is extra. A dry-run prints
+`would unbind wif <member> → <sa>` and counts it in the trailer; with nothing
 extra it prints `ok no extra wif bindings`. A plain `--prune` runs it too. The nightly `sa_audit`
 stays report-only.
 

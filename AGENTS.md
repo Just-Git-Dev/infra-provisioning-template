@@ -37,8 +37,12 @@ which pins a **full commit SHA**, not `@v1`.
 - **`prune_wif` owns `workloadIdentityUser`; the own-pool prefix is the ownership proof.** It
   removes a member only from a DECLARED SA, only if the member starts with THIS project's pool
   prefix (`principal[Set]://iam.googleapis.com/projects/<num>/locations/global/workloadIdentityPools/<pool>/`),
-  and only if config no longer declares it. Any other member is "not ours, kept". `retire: true`
-  declares no members. No `wif.pool` -> skip. `sa_audit` stays report-only.
+  and only if config no longer declares it. ANY undeclared own-pool member goes, including types
+  `ensure_wif` never writes (`attribute.repository_owner`, `/*`, `subject/...`): owner ruling.
+  Any other member is "not ours, kept"; a CONDITIONAL binding is reported and kept. `retire: true`
+  declares no members (and runs `validate_retired`). No `wif.pool` -> skip. The validated
+  `_project_number` wins over `project.gcp_number`. Prints `examined N SAs, M wif members` every
+  run. `sa_audit` stays report-only.
 - **`human_managed_roles` are declared, never granted.** `[{role, condition: {title, expression}}]`
   per SA; the engine never adds or removes them and `grantable-roles.txt` stays unchanged. The
   audit treats an exact match as ok, ANY other live conditional binding of that role (also beside

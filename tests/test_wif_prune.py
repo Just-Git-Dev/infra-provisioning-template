@@ -32,29 +32,35 @@ def _cfg(sas, wif=WIF):
     return cfg
 
 
-def _gout(live):
-    """live: {sa name: [members holding workloadIdentityUser on it]}."""
+def _gout(live, cond=None, number=NUM):
+    """live: {sa name: [members holding workloadIdentityUser on it]}. cond: {sa name:
+    [(title, [members])]} are CONDITIONAL workloadIdentityUser bindings. number: what
+    `projects describe` answers."""
     by_email = {email(n): m for n, m in live.items()}
+    cond_by_email = {email(n): m for n, m in (cond or {}).items()}
 
     def gout(args, project=None):
         j = " ".join(args)
         if args[:2] == ["projects", "describe"]:
-            return NUM
+            return number
         if args[:3] == ["iam", "service-accounts", "get-iam-policy"] and args[3] in by_email:
             members = by_email[args[3]]
             if "--format=json" in args:
-                return json.dumps({"bindings": [{"role": ROLE, "members": members}]})
+                bs = [{"role": ROLE, "members": members}] if members else []
+                bs += [{"role": ROLE, "members": ms, "condition": {"title": t, "expression": "true"}}
+                       for t, ms in cond_by_email.get(args[3], [])]
+                return json.dumps({"bindings": bs})
             return "\n".join(members) if "workloadIdentityUser" in j else ""
         return ""
 
     return gout
 
 
-def _prune(cfg, live, dry=False):
+def _prune(cfg, live, dry=False, **kw):
     assert hasattr(P, "prune_wif"), "gcp.prune_wif does not exist yet (feature missing)"
     assert "wif" in P.PRUNERS, "PRUNERS has no 'wif' entry (feature missing)"
     P._PROJECT_NUMBERS.clear()
-    rec = install(_gout(live), dry=dry)
+    rec = install(_gout(live, **kw), dry=dry)
     out, exc, _ = call(P.PRUNERS["wif"], cfg, PROJECT)
     return rec, out, exc
 
@@ -145,6 +151,78 @@ def test_plain_prune_includes_wif_and_nothing_extra_reports_ok():
     cfg = _cfg([{"name": "ops", "wif_subjects": [{"repo": "Example-Org/demo", "environment": "ops"}]}])
     rec, out, exc = _prune(cfg, {"ops": [SUBJECT]})
     assert exc is None and "✓ no extra wif bindings" in out, (exc, out)   # ok prints as "✓"
+    assert rec.calls == [], rec.calls
+
+
+# ── review fixes 4-6, 8 ──────────────────────────────────────────────────────
+def test_t18_examined_line_is_always_printed():
+    cfg = _cfg([{"name": "ops", "wif_subjects": [{"repo": "Example-Org/demo", "environment": "ops"}]},
+                {"name": "idle"}])
+    rec, out, exc = _prune(cfg, {"ops": [SUBJECT, REPOWIDE], "idle": []})
+    assert exc is None and "examined 2 SAs, 2 wif members" in out, (exc, out)
+    rec, out, exc = _prune(cfg, {"ops": [SUBJECT], "idle": []})          # nothing extra
+    assert exc is None and "no extra wif bindings" in out, (exc, out)
+    assert "examined 2 SAs, 1 wif members" in out, out
+    rec, out, exc = _prune(_cfg([{"name": "ops"}], wif=None), {"ops": [REPOWIDE]})   # no pool
+    assert "examined 0 SAs, 0 wif members" in out, out
+
+
+def test_t19_pool_name_prefix_is_not_the_own_pool():
+    # `github-actions-2` merely STARTS with `github-actions`: the trailing slash must matter.
+    cfg = _cfg([{"name": "ops"}])
+    near = f"principalSet://iam.googleapis.com/projects/{NUM}/locations/global/workloadIdentityPools/{POOL}-2/attribute.repository/x/y"
+    rec, out, exc = _prune(cfg, {"ops": [near, REPOWIDE]})
+    assert exc is None, (exc, out)
+    assert _members_removed(rec) == [REPOWIDE], (rec.calls, out)        # positive control
+    assert any(near in ln and "not ours, kept" in ln for ln in out.splitlines()), out
+
+
+def test_t20_project_number_prefix_is_not_the_own_project():
+    # project 420 merely STARTS with 42
+    cfg = _cfg([{"name": "ops"}])
+    near = f"principalSet://iam.googleapis.com/projects/420/locations/global/workloadIdentityPools/{POOL}/attribute.repository/x/y"
+    rec, out, exc = _prune(cfg, {"ops": [near, REPOWIDE]})
+    assert exc is None, (exc, out)
+    assert _members_removed(rec) == [REPOWIDE], (rec.calls, out)
+    assert any(near in ln and "not ours, kept" in ln for ln in out.splitlines()), out
+
+
+def test_t21_validated_project_number_wins_over_config_gcp_number():
+    # README: the number is `_project_number` (validated describe), never the config's value.
+    cfg = _cfg([{"name": "ops", "wif_subjects": [{"repo": "Example-Org/demo", "environment": "ops"}]}])
+    cfg["project"] = {"gcp_number": "7"}
+    wrong = f"principalSet:{OTHER_NUM}/attribute.repository/x/y"        # project 7's pool
+    rec, out, exc = _prune(cfg, {"ops": [SUBJECT, REPOWIDE, wrong]})
+    assert exc is None, (exc, out)
+    assert _members_removed(rec) == [REPOWIDE], (rec.calls, out)        # SUBJECT stays declared
+    assert any(wrong in ln and "not ours, kept" in ln for ln in out.splitlines()), out
+
+
+def test_t22_non_numeric_project_number_exits_and_removes_nothing():
+    cfg = _cfg([{"name": "ops"}])
+    for bad in ("not-a-number", ""):
+        rec, out, exc = _prune(cfg, {"ops": [REPOWIDE]}, number=bad)
+        assert exc is not None and "project number" in str(exc.code), (bad, exc, out)
+        assert "service_agents" not in str(exc.code), exc.code           # review fix 8: neutral message
+        assert rec.calls == [] and core.MUTATIONS == 0, rec.calls
+
+
+def test_t23_conditional_wif_binding_is_reported_and_kept():
+    cfg = _cfg([{"name": "ops"}])
+    rec, out, exc = _prune(cfg, {"ops": [REPOWIDE]},
+                           cond={"ops": [("narrow", [SUBJECT, "user:someone@example.org"])]})
+    assert exc is None, (exc, out)
+    assert _members_removed(rec) == [REPOWIDE], (rec.calls, out)        # unconditional one IS removed
+    for m in (SUBJECT, "user:someone@example.org"):
+        assert any(m in ln and "conditional" in ln and "(narrow)" in ln and "kept" in ln
+                   for ln in out.splitlines()), (m, out)
+
+
+def test_t24_malformed_tombstone_exits_before_any_removal():
+    # same guard prune_service_accounts runs: a retire: true SA carrying other keys is refused
+    cfg = _cfg([{"name": "old", "retire": True, "roles": ["run.developer"]}])
+    rec, out, exc = _prune(cfg, {"old": [REPOWIDE]})
+    assert exc is not None and "retire" in str(exc.code), (exc, out)
     assert rec.calls == [], rec.calls
 
 

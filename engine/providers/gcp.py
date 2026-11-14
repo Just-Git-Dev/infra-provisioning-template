@@ -1042,8 +1042,8 @@ def _project_number(project):
         num = (gout(["projects", "describe", project, "--format=value(projectNumber)"], project)
                or "").strip()
         if not num.isdigit():
-            sys.exit(f"service_agents: cannot read the project number of {project!r} "
-                     f"(got {num!r}); refusing to guess a service-agent member")
+            sys.exit(f"cannot read the project number of {project!r} (got {num!r}); "
+                     f"refusing to guess a member built from it")
         _PROJECT_NUMBERS[project] = num
     return _PROJECT_NUMBERS[project]
 
@@ -1412,9 +1412,11 @@ def prune_wif(cfg, project):
     `retire: true` SA declares no members. The project number is the validated `_project_number`,
     never `_wif_base`'s unvalidated fallback: a wrong prefix would mis-classify ownership."""
     print("prune wif:")
+    validate_retired(cfg)
     pool = (cfg.get("wif") or {}).get("pool")
     if not pool:
         c("skip", "no wif.pool configured")
+        c("ok", "examined 0 SAs, 0 wif members")
         return
     num = _project_number(project)
     prefix = f"//iam.googleapis.com/projects/{num}/locations/global/workloadIdentityPools/{pool}/"
@@ -1422,21 +1424,36 @@ def prune_wif(cfg, project):
                                                        "gcp_number": num}},
                                    project, prefix)
     wif_user = "roles/iam.workloadIdentityUser"
-    extra = False
+    extra, n_sas, n_members = False, 0, 0
     for sa in cfg.get("service_accounts", []):
         email = sa_email(sa["name"], project)
         want = set() if _retired(sa) else {m for r, m in declared.get(sa["name"], ()) if r == wif_user}
-        for member in sa_wif_members(project, email):
-            if member in want:
+        n_sas += 1
+        # The JSON policy, not the flattened member list: it keeps conditions. The engine writes
+        # only UNconditional members, so a conditional binding is reported and kept.
+        raw = gout(["iam", "service-accounts", "get-iam-policy", email, "--project", project,
+                    "--format=json"], project)
+        for b in (json.loads(raw).get("bindings") if raw else None) or []:
+            if b.get("role") != wif_user:
                 continue
-            scheme, _, rest = member.partition(":")
-            if scheme not in ("principal", "principalSet") or not rest.startswith(prefix):
-                c("skip", f"{sa['name']}: {member}: not ours, kept")
-                continue
-            extra = True
-            undo(["iam", "service-accounts", "remove-iam-policy-binding", email, "--project", project,
-                  f"--role={wif_user}", f"--member={member}"],
-                 project, f"unbind wif {member} → {sa['name']}")
+            cond = b.get("condition")
+            for member in b.get("members") or []:
+                n_members += 1
+                if cond:
+                    c("skip", f"{sa['name']}: {member}: conditional binding ({cond.get('title')}) "
+                              f"not engine-owned, kept")
+                    continue
+                if member in want:
+                    continue
+                scheme, _, rest = member.partition(":")
+                if scheme not in ("principal", "principalSet") or not rest.startswith(prefix):
+                    c("skip", f"{sa['name']}: {member}: not ours, kept")
+                    continue
+                extra = True
+                undo(["iam", "service-accounts", "remove-iam-policy-binding", email, "--project",
+                      project, f"--role={wif_user}", f"--member={member}"],
+                     project, f"unbind wif {member} → {sa['name']}")
+    c("ok", f"examined {n_sas} SAs, {n_members} wif members")
     if not extra:
         c("ok", "no extra wif bindings")
 
