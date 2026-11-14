@@ -68,8 +68,10 @@ all_keys(){ local e; for e in "${PROJECTS[@]}"; do printf '%s\n' "${e%%:*}"; don
 # (APIs, secrets, pub/sub, alerts) — those are app-owned (scope narrowed 2026-07-01,
 # act_as added 2026-07-02, see DECISIONS + ADR-001). So the provisioner needs ONLY the
 # identity/IAM admin roles listed in bootstrap/provisioner-roles.txt — no serviceusage/
-# pubsub/monitoring/logging/secrets grants. (iam.serviceAccountAdmin already covers
-# act_as: it includes get/set-IamPolicy on service accounts.) The provisioner GRANTS
+# pubsub/monitoring/logging/secrets grants. (Service-account admin covers act_as: it
+# includes get/set-IamPolicy on service accounts. It is NO LONGER in that file: the fleet SA
+# holds the org role jgdFleetSaAdmin, minus delete, so this per-project rollback anchor
+# grants no service-account admin.) The provisioner GRANTS
 # roles to app SAs via projectIamAdmin without HOLDING them.
 #
 # SINGLE SOURCE OF TRUTH: bootstrap/provisioner-roles.txt (also read by the engine's

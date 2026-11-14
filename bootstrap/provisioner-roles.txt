@@ -10,7 +10,13 @@
 # the engine. A line carrying it names a PROJECT-SCOPED custom role: it can only be
 # granted per-project, so fleet-anchor.sh skips it when granting at folder/org scope.
 # Comment lines (#) and blanks are ignored.
-roles/iam.serviceAccountAdmin
+#
+# NOT listed here: service-account admin. The fleet SA holds the org custom role
+# `jgdFleetSaAdmin` (roles/iam.serviceAccountAdmin MINUS iam.serviceAccounts.delete/undelete/
+# disable), defined and bound at the scope node by fleet-anchor.sh; the engine's scope audit
+# allows it by name (gcp.py FLEET_SA_ADMIN_ROLE_ID). Only a separate retirer identity deletes
+# service accounts. The superseded per-project anchor.sh therefore no longer grants
+# service-account admin.
 roles/resourcemanager.projectIamAdmin
 roles/iam.workloadIdentityPoolAdmin
 

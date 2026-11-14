@@ -5,8 +5,9 @@ the alternatives were. Newest first.
 
 ## Index
 
-25 entries. Newest first.
+26 entries. Newest first.
 
+- [2026-11-14 — Fleet provisioner loses service-account delete: jgdFleetSaAdmin replaces iam.serviceAccountAdmin](#2026-11-14--fleet-provisioner-loses-service-account-delete-jgdfleetsaadmin-replaces-iamserviceaccountadmin)
 - [2026-11-14 — prune_wif owns workloadIdentityUser; human_managed_roles are declared, never granted](#2026-11-14--prune_wif-owns-workloadidentityuser-human_managed_roles-are-declared-never-granted)
 - [2026-11-13 — SA retirement: `retire: true`, a `--retire` deleter mode, orphan and stray-role detection](#2026-11-13--sa-retirement-retire-true-a---retire-deleter-mode-orphan-and-stray-role-detection)
 - [2026-10-21 — Dry-run verifies a custom role exists before planning its binding](#2026-10-21--dry-run-verifies-a-custom-role-exists-before-planning-its-binding)
@@ -32,6 +33,16 @@ the alternatives were. Newest first.
 - [2026-08-21 — caller inputs move to `env:`; CI grows actionlint and lints `action.yml` itself](#2026-08-21--caller-inputs-move-to-env-ci-grows-actionlint-and-lints-actionyml-itself)
 - [2026-08-20 — SHA-pin this repo's own actions and enforce it in CI](#2026-08-20--sha-pin-this-repos-own-actions-and-enforce-it-in-ci)
 - [2026-08-20 — port the two mutation-path engine fixes from the consumer; release v1.0.1](#2026-08-20--port-the-two-mutation-path-engine-fixes-from-the-consumer-release-v101)
+
+## 2026-11-14 — Fleet provisioner loses service-account delete: jgdFleetSaAdmin replaces iam.serviceAccountAdmin
+
+**Decision (owner ruling Q1 = b of the SA-retire plan, made in the config repo).** The fleet provisioner no longer holds org `roles/iam.serviceAccountAdmin`. It holds the org custom role `jgdFleetSaAdmin`: that predefined role's 19 permissions (read live 2026-11-14) minus `iam.serviceAccounts.delete`, `iam.serviceAccounts.undelete` and `iam.serviceAccounts.disable`, so 16. Only the separate retirer identity can delete a service account.
+
+- **`bootstrap/provisioner-roles.txt`** drops `roles/iam.serviceAccountAdmin` (2 predefined roles + `jgdSecretIamAdmin` remain). The engine reads this file for `--prune`.
+- **Engine:** `_audit_scope_grants` allows `<scope>/roles/jgdFleetSaAdmin` by name (`FLEET_SA_ADMIN_ROLE_ID`, like `SCOPE_READER_ROLE_ID`), so the daily scope audit neither flags the new role nor misses a leftover `roles/iam.serviceAccountAdmin`, which now reports as undeclared. No handler needs a stripped permission: the engine's service-accounts calls are create, describe, update, get-iam-policy and add/remove-iam-policy-binding; the only `delete` is `--retire`, run by the retirer identity.
+- **Reference anchor:** `fleet-anchor.sh` defines the role, binds it at the scope node, and only then removes the old org binding (add before remove). `REACH=grant` has no org, so it warns and binds none.
+- **Cost:** the per-project `anchor.sh` no longer grants service-account admin (it is the superseded rollback path); `iam.serviceAccountApiKeyBindings.delete` and `deleteTagBinding` stay.
+- **Rollout:** a topology repo that pins this engine must re-anchor (create the role, swap the binding) after bumping the pin. Bumping the pin before the re-anchor makes the scope audit flag the old binding as undeclared until the re-anchor runs.
 
 ## 2026-11-14 — prune_wif owns workloadIdentityUser; human_managed_roles are declared, never granted
 
