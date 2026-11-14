@@ -114,6 +114,7 @@ def test_t11_declared_but_absent_live_is_a_finding_that_fails_the_audit():
 MALFORMED = {
     "not a list": "roles/secretmanager.admin",
     "entry not a mapping": ["roles/secretmanager.admin"],
+    "short role name": [{"role": "secretmanager.admin", "condition": {"title": TITLE, "expression": EXPR}}],
     "role not a string": [{"role": 7, "condition": {"title": TITLE, "expression": EXPR}}],
     "missing condition": [{"role": ROLE}],
     "condition not a mapping": [{"role": ROLE, "condition": "base"}],

@@ -116,6 +116,20 @@ def sa_project_roles(project, email):
     return [r for r in out.splitlines() if r]
 
 
+def sa_project_bindings(project, email):
+    """{(role, condition title|None, condition expression|None), ...} this SA holds on the PROJECT
+    (live). Unlike sa_project_roles it keeps the condition, so a conditional binding differs from
+    an unconditional one of the same role."""
+    raw = gout(["projects", "get-iam-policy", project, "--format=json"])
+    out, me = set(), f"serviceAccount:{email}"
+    for b in (json.loads(raw).get("bindings") if raw else None) or []:
+        if me in (b.get("members") or []):
+            cond = b.get("condition") or {}
+            out.add((b.get("role"), cond.get("title") if cond else None,
+                     cond.get("expression") if cond else None))
+    return out
+
+
 def sa_user_members(project, email):
     """All members holding roles/iam.serviceAccountUser ON this SA (i.e. who may act as it)."""
     out = gout(["iam", "service-accounts", "get-iam-policy", email, "--project", project,
@@ -571,8 +585,37 @@ def _sa_roles(cfg, caps=None):
     Computed for EVERY SA before the first binding is emitted: an unknown capability on the
     fifth SA must not surface after four have already been bound under --apply."""
     caps = capabilities() if caps is None else caps
+    for sa in cfg.get("service_accounts", []):
+        _human_managed(sa)
     return [(sa, _expand_roles(sa.get("roles"), f"service_accounts: {sa['name']}", caps))
             for sa in cfg.get("service_accounts", []) if not _retired(sa)]
+
+
+def _human_managed(sa):
+    """{(role, title, expression), ...} from `human_managed_roles: [{role, condition: {title,
+    expression}}]` — a conditional project role a human owns. DECLARED only: the engine never
+    grants or removes it. `role` must be fully qualified (`roles/...` or `projects/<p>/roles/...`);
+    a short name would never equal what the live policy returns, so it exits instead of drifting."""
+    got = sa.get("human_managed_roles")
+    if got is None:
+        return set()
+    where = f"service account {sa.get('name')!r}: human_managed_roles"
+    if not isinstance(got, list):
+        sys.exit(f"{where} must be a list of {{role, condition: {{title, expression}}}}, got {got!r}")
+    out = set()
+    for e in got:
+        role = e.get("role") if isinstance(e, dict) else None
+        cond = e.get("condition") if isinstance(e, dict) else None
+        if not isinstance(role, str) or not (role.startswith("roles/") or
+                                             (role.startswith("projects/") and "/roles/" in role)):
+            sys.exit(f"{where}: role must be a qualified string (roles/... or projects/<p>/roles/...), "
+                     f"got {role!r}")
+        title, expr = (cond.get("title"), cond.get("expression")) if isinstance(cond, dict) else (None, None)
+        if not (isinstance(title, str) and title and isinstance(expr, str) and expr):
+            sys.exit(f"{where}: {role} needs condition.title and condition.expression as "
+                     f"non-empty strings, got {cond!r}")
+        out.add((role, title, expr))
+    return out
 
 
 def _declared_resource_roles(cfg, project):
@@ -852,7 +895,13 @@ def prune_service_accounts(cfg, project):
         want = set() if _retired(sa) else set(
             _expand_roles(sa.get("roles"), f"service_accounts: {sa['name']}"))
         live = sa_project_roles(project, email)
-        extra = [r for r in live if r not in want]
+        hm = _human_managed(sa)
+        # A role whose ONLY live bindings are declared human-managed is neither extra nor stray.
+        held = {}
+        for role, title, expr in (sa_project_bindings(project, email) if hm else ()):
+            held.setdefault(role, set()).add((role, title, expr))
+        kept = {r for r, bs in held.items() if bs <= hm}
+        extra = [r for r in live if r not in want and r not in kept]
         if not extra:
             c("ok", f"{name}: no extra roles")
             continue
@@ -1070,7 +1119,16 @@ def _sa_audit_findings(cfg, project, strict=True):
         # provisioner CANNOT remove are findings here; a removable extra is the pruner's work.
         want_roles = set() if _retired(sa) else set(
             _expand_roles(sa.get("roles"), f"service_accounts: {sa['name']}"))
-        extra = [r for r in sa_project_roles(project, email) if r not in want_roles]
+        hm = _human_managed(sa)
+        held = {}
+        for b in (sa_project_bindings(project, email) if hm else ()):
+            held.setdefault(b[0], set()).add(b)
+        # A declared human-managed role is judged below (ok / drifted / missing), never as a stray,
+        # unless the SA also holds it UNconditionally (the declaration covers only the conditional form).
+        covered = {r for r, bs in held.items()
+                   if r in {h[0] for h in hm} and all(b[1] is not None for b in bs)}
+        extra = [r for r in sa_project_roles(project, email)
+                 if r not in want_roles and r not in covered]
         if extra and not allow_read:
             allow, allow_read = grantable_roles(strict), True
         for role in extra if allow is not None else []:
@@ -1078,6 +1136,16 @@ def _sa_audit_findings(cfg, project, strict=True):
                 c("err", f"STRAY on {sa['name']}: holds {role} (provisioner cannot remove — IP3)")
                 findings.append(f"{sa['name']}: stray role (provisioner cannot remove — IP3) "
                                 f"{role}; a human removes it")
+        for role, title, expr in sorted(hm):
+            if (role, title, expr) in held.get(role, ()):
+                c("ok", f"{sa['name']}: ok human-managed {role} ({title})")
+            elif any(b[1] is not None for b in held.get(role, ())):
+                c("err", f"{sa['name']}: human-managed binding drifted: {role} is held under a "
+                         f"different condition than declared ({title})")
+                findings.append(f"{sa['name']}: human-managed binding drifted {role} ({title})")
+            else:
+                c("err", f"{sa['name']}: human-managed binding missing: {role} ({title})")
+                findings.append(f"{sa['name']}: human-managed binding missing {role} ({title})")
         want = declared.get(sa["name"], set())
         bad = []
         for b in json.loads(raw).get("bindings") or []:
