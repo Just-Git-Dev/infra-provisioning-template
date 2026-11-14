@@ -437,6 +437,39 @@ ensure_scope_reader_role(){ # org_id
   fi
 }
 
+# ── fleet SA's service-account admin: roles/iam.serviceAccountAdmin MINUS delete ────────────────
+# The provisioner must not be able to delete, undelete or disable a service account. No predefined
+# role is "serviceAccountAdmin without delete", so this is the predefined role's permission list
+# (19, read 2026-11-14) minus those three. Org-scoped (custom roles are never folder-scoped), bound
+# at the scope node by grant_scope. The engine's scope audit allows it by name (gcp.py
+# FLEET_SA_ADMIN_ROLE_ID, tied to this id by tests/test_anchor.py).
+FLEET_SA_ADMIN_ROLE_ID="jgdFleetSaAdmin"
+LEGACY_SA_ADMIN_ROLE="roles/iam.serviceAccountAdmin"   # what jgdFleetSaAdmin replaced; removed after the add
+FLEET_SA_ADMIN_PERMS="iam.serviceAccountApiKeyBindings.create,iam.serviceAccountApiKeyBindings.delete,iam.serviceAccountApiKeyBindings.undelete,iam.serviceAccounts.create,iam.serviceAccounts.createTagBinding,iam.serviceAccounts.deleteTagBinding,iam.serviceAccounts.enable,iam.serviceAccounts.get,iam.serviceAccounts.getIamPolicy,iam.serviceAccounts.list,iam.serviceAccounts.listEffectiveTags,iam.serviceAccounts.listTagBindings,iam.serviceAccounts.setIamPolicy,iam.serviceAccounts.update,resourcemanager.projects.get,resourcemanager.projects.list"
+
+ensure_fleet_sa_admin_role(){ # org_id
+  local org="$1" live live_desc want
+  local title="JGD Fleet SA Admin"
+  local desc="Service-account admin for the fleet provisioner: create/update/enable/get/list and IAM on SAs. NO delete/undelete/disable (only a separate retirer identity deletes). | $PROVENANCE"
+  live="$(g iam roles describe "$FLEET_SA_ADMIN_ROLE_ID" --organization="$org" \
+            --format='value[delimiter=","](includedPermissions)' 2>/dev/null || true)"
+  live_desc="$(g iam roles describe "$FLEET_SA_ADMIN_ROLE_ID" --organization="$org" \
+                --format='value(description)' 2>/dev/null || true)"
+  want="$(printf '%s' "$FLEET_SA_ADMIN_PERMS" | tr ',' '\n' | sort | tr '\n' ' ')"
+  if [ -z "$live" ]; then
+    do_or_dry g iam roles create "$FLEET_SA_ADMIN_ROLE_ID" --organization="$org" --title="$title" \
+      --description="$desc" --permissions="$FLEET_SA_ADMIN_PERMS" --stage=GA >/dev/null \
+      && add "custom role $FLEET_SA_ADMIN_ROLE_ID (org $org)"
+  elif [ "$(printf '%s' "$live" | tr ',' '\n' | sort | tr '\n' ' ')" != "$want" ] \
+       || [ "$live_desc" != "$desc" ]; then
+    do_or_dry g iam roles update "$FLEET_SA_ADMIN_ROLE_ID" --organization="$org" --title="$title" \
+      --description="$desc" --permissions="$FLEET_SA_ADMIN_PERMS" --stage=GA >/dev/null \
+      && add "custom role $FLEET_SA_ADMIN_ROLE_ID (metadata synced)"
+  else
+    ok "custom role $FLEET_SA_ADMIN_ROLE_ID"
+  fi
+}
+
 # ── REACH: give the fleet SA admin on the targets ────────────────────────────
 grant_project(){ # key
   local key="$1" proj role
@@ -505,6 +538,29 @@ grant_scope(){ # kind id  (folder|org)
         --member="serviceAccount:$FLEET_SA" --role="$_reader" --condition=None >/dev/null && add "role $_reader"; fi
   fi
 
+  # The provisioner's service-account admin, WITHOUT delete. ADD the custom role's binding first and
+  # remove the predefined role's only after it: a failed add must never leave the fleet SA with no
+  # service-account admin at all.
+  ensure_fleet_sa_admin_role "$_org_for_role" || return 1
+  local _sa_admin="organizations/$_org_for_role/roles/$FLEET_SA_ADMIN_ROLE_ID" _fm="serviceAccount:$FLEET_SA"
+  local _has _bind _unbind
+  if [ "$kind" = folder ]; then
+    _has=folder_has_role; _bind=(resource-manager folders); _unbind=(resource-manager folders)
+  else
+    _has=org_has_role; _bind=(organizations); _unbind=(organizations)
+  fi
+  if "$_has" "$id" "$_sa_admin" "$_fm"; then ok "role $_sa_admin"; else
+    if do_or_dry g "${_bind[@]}" add-iam-policy-binding "$id" \
+         --member="$_fm" --role="$_sa_admin" --condition=None >/dev/null; then add "role $_sa_admin"; else
+      err "could not bind $_sa_admin — leaving $LEGACY_SA_ADMIN_ROLE in place"; return 1; fi
+  fi
+  if "$_has" "$id" "$LEGACY_SA_ADMIN_ROLE" "$_fm"; then
+    if do_or_dry g "${_unbind[@]}" remove-iam-policy-binding "$id" \
+         --member="$_fm" --role="$LEGACY_SA_ADMIN_ROLE" --condition=None >/dev/null; then
+      add "removed $LEGACY_SA_ADMIN_ROLE from $_fm at $kind $id"; else
+      err "could not remove $LEGACY_SA_ADMIN_ROLE: the provisioner can STILL delete service accounts"; return 1; fi
+  else ok "no $LEGACY_SA_ADMIN_ROLE binding at $kind $id"; fi
+
   grant_conditional_project_iam_admin "$kind" "$id" || return 1
 
   echo "  NB: folder/org grants PREDEFINED roles only — APIs and project-scoped CUSTOM roles"
@@ -548,6 +604,8 @@ if [ "$REACH" = grant ]; then
   KEYS=()
   if [ "$#" -gt 0 ]; then KEYS=("$@"); else while IFS= read -r _k; do KEYS+=("$_k"); done < <(all_keys); fi
   for k in "${KEYS[@]}"; do grant_project "$k" || rc=1; done
+  # jgdFleetSaAdmin is an ORG role: REACH=grant binds no service-account admin at all. Say so.
+  echo "  ! REACH=grant binds NO service-account admin: jgdFleetSaAdmin is an org custom role (needs REACH=org|folder with ORG_ID)."
 else
   # folder/org: grant reach once at scope, then still enable APIs on the known targets.
   if [ "$REACH" = folder ]; then grant_scope folder "$FOLDER_ID" || rc=1; else grant_scope org "$ORG_ID" || rc=1; fi

@@ -334,8 +334,11 @@ Edit the `PROVISIONER_REPO` / `PROJECTS` placeholders (or set `PROVISIONER_REPO`
 ## Safety notes
 
 - **Least privilege:** the provisioner GRANTS roles to app SAs via `projectIamAdmin` without
-  holding them — 3 identity/IAM-admin roles in `provisioner-roles.txt`, plus one **custom**
-  role, `jgdSecretIamAdmin`, that `resource_roles.secrets` needs. `projectIamAdmin` confers
+  holding them — 2 identity/IAM-admin roles in `provisioner-roles.txt`, the org **custom** role
+  `jgdFleetSaAdmin` (service-account admin **without** `delete`/`undelete`/`disable`; defined by
+  `fleet-anchor.sh`, allowed by name in the scope audit, so a leaked provisioner cannot delete a
+  service account), plus one more **custom** role, `jgdSecretIamAdmin`, that
+  `resource_roles.secrets` needs. `projectIamAdmin` confers
   `setIamPolicy` on the **project**, not on a resource, so binding a role on a *secret* needs
   `secretmanager.secrets.setIamPolicy` on that secret. It is a custom role and not
   `roles/secretmanager.admin` deliberately: admin includes `versions.access`, which would let
@@ -345,7 +348,7 @@ Edit the `PROVISIONER_REPO` / `PROJECTS` placeholders (or set `PROVISIONER_REPO`
 - **`principals` is guarded by a FILE, not by IAM.** `modifiedGrantsByRole` — the IAM Condition
   behind `grantable-roles.txt` — applies to **project/folder/org** allow policies only. A
   service-account resource policy has no equivalent attribute, so the provisioner's
-  `iam.serviceAccountAdmin` is unconditioned there and IAM will not refuse a bad `principals:`
+  `jgdFleetSaAdmin` is unconditioned there and IAM will not refuse a bad `principals:`
   entry. `bootstrap/principal-grantable-roles.txt` and the reviewer are the only mechanical
   controls. That is the same posture resource-scoped SA bindings have always had; `principals`
   is the first block that points it at a **human**, which is why the allow-list exists at all

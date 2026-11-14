@@ -21,6 +21,7 @@ case "$args" in
   *"config get-value account"*)  echo tester@example.com; exit 0 ;;
   *"projects describe"*)         case "$args" in *projectNumber*) echo 123456789 ;; esac; exit 0 ;;
   *describe*)                    exit 1 ;;
+  *"organizations get-iam-policy"*) [ -n "${STUB_ORG_ROLES:-}" ] && printf '%s\n' $STUB_ORG_ROLES; exit 0 ;;
   *"get-iam-policy"*|*"services list"*) exit 0 ;;
   *)                             echo "MUTATION: $args" >> "$STUB_LOG"; exit 0 ;;
 esac
@@ -185,6 +186,89 @@ def test_wif_provider_gets_a_display_name():
         for ln in out.splitlines():
             if "create-oidc" in ln:
                 assert "--display-name=" in ln, "%s: provider without displayName: %s" % (script, ln)
+
+
+# ── the provisioner cannot delete / undelete / disable a service account (ADR-013 amendment) ────
+# roles/iam.serviceAccountAdmin as read live 2026-11-14 (19 permissions) minus the three below.
+SA_DELETE_PERMS = {"iam.serviceAccounts.delete", "iam.serviceAccounts.undelete",
+                   "iam.serviceAccounts.disable"}
+FLEET_SA_ADMIN_PERMS = {
+    "iam.serviceAccountApiKeyBindings.create", "iam.serviceAccountApiKeyBindings.delete",
+    "iam.serviceAccountApiKeyBindings.undelete", "iam.serviceAccounts.create",
+    "iam.serviceAccounts.createTagBinding", "iam.serviceAccounts.deleteTagBinding",
+    "iam.serviceAccounts.enable", "iam.serviceAccounts.get", "iam.serviceAccounts.getIamPolicy",
+    "iam.serviceAccounts.list", "iam.serviceAccounts.listEffectiveTags",
+    "iam.serviceAccounts.listTagBindings", "iam.serviceAccounts.setIamPolicy",
+    "iam.serviceAccounts.update", "resourcemanager.projects.get", "resourcemanager.projects.list",
+}
+FLEET_ORG_ENV = {"HOST_PROJECT": "host-project", "REACH": "org", "ORG_ID": "111111111111"}
+
+
+def _would_lines(out):
+    return [ln for ln in out.splitlines() if "would:" in ln]
+
+
+def _provisioner_role_lines():
+    path = os.path.join(ROOT, "bootstrap", "provisioner-roles.txt")
+    return [ln.split("#", 1)[0].strip() for ln in open(path) if ln.split("#", 1)[0].strip()]
+
+
+def _fleet_sa_admin_perms(out):
+    lines = [ln for ln in _would_lines(out) if "roles create jgdFleetSaAdmin" in ln]
+    assert len(lines) == 1, out[-2000:]
+    assert "--organization=" in lines[0], lines[0]
+    return set(lines[0].split("--permissions=", 1)[1].split(" ")[0].split(","))
+
+
+def test_jgdFleetSaAdmin_permissions_exact():
+    assert len(FLEET_SA_ADMIN_PERMS) == 16 and not FLEET_SA_ADMIN_PERMS & SA_DELETE_PERMS
+    for mode, env in REACH_MODES:
+        out, _ = run_anchor("fleet-anchor.sh", dict(env, HOST_PROJECT="host-project"))
+        perms = _fleet_sa_admin_perms(out)
+        assert perms == FLEET_SA_ADMIN_PERMS, (mode, sorted(perms ^ FLEET_SA_ADMIN_PERMS))
+
+
+def test_provisioner_role_set_holds_no_sa_delete_undelete_or_disable():
+    kept = _provisioner_role_lines()
+    for bad in ("roles/iam.serviceAccountAdmin", "roles/owner", "roles/editor",
+                "roles/iam.serviceAccountDeleter"):
+        assert bad not in kept, "%s in provisioner-roles.txt lets the provisioner delete an SA" % bad
+    out, _ = run_anchor("fleet-anchor.sh", dict(FLEET_ORG_ENV))
+    assert not _fleet_sa_admin_perms(out) & SA_DELETE_PERMS
+
+
+def test_fleet_sa_admin_is_bound_at_the_org_then_the_old_binding_is_removed():
+    out, _ = run_anchor("fleet-anchor.sh", dict(FLEET_ORG_ENV, STUB_ORG_ROLES="roles/iam.serviceAccountAdmin"))
+    would = _would_lines(out)
+    new = "organizations/111111111111/roles/jgdFleetSaAdmin"
+    adds = [i for i, ln in enumerate(would) if "organizations add-iam-policy-binding" in ln and new in ln]
+    rems = [i for i, ln in enumerate(would) if "organizations remove-iam-policy-binding" in ln
+            and "--role=roles/iam.serviceAccountAdmin" in ln]
+    assert len(adds) == 1 and len(rems) == 1, would
+    assert adds[0] < rems[0], "the old binding must be removed only AFTER the new one is added"
+
+
+def test_no_removal_is_announced_when_the_old_binding_is_already_gone():
+    out, _ = run_anchor("fleet-anchor.sh", dict(FLEET_ORG_ENV))
+    assert not [ln for ln in _would_lines(out) if "remove-iam-policy-binding" in ln
+                and "iam.serviceAccountAdmin" in ln], out[-2000:]
+
+
+def test_grant_reach_without_an_org_warns_that_no_sa_admin_is_bound():
+    out, _ = run_anchor("fleet-anchor.sh", {"HOST_PROJECT": "host-project"})
+    assert "jgdFleetSaAdmin" in out and "ORG_ID" in out, out[-2000:]
+    assert "roles create jgdFleetSaAdmin" not in out
+
+
+def test_engine_and_script_agree_on_the_fleet_sa_admin_role():
+    """The script CREATES the role, the engine ALLOWS it by name in the scope audit. If the ids
+    drift the daily audit reports the provisioner's own service-account admin as undeclared."""
+    script = open(os.path.join(ROOT, "bootstrap", "fleet-anchor.sh")).read()
+    line = [l for l in script.splitlines() if l.startswith("FLEET_SA_ADMIN_ROLE_ID=")]
+    assert len(line) == 1, "expected exactly one FLEET_SA_ADMIN_ROLE_ID in fleet-anchor.sh"
+    sys.path.insert(0, os.path.join(ROOT, "engine"))
+    from providers import gcp
+    assert gcp.FLEET_SA_ADMIN_ROLE_ID == line[0].split("=", 1)[1].strip().strip('"')
 
 
 if __name__ == "__main__":

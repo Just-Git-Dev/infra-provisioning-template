@@ -176,6 +176,12 @@ PROVISIONER_SA = "infra-provisioner"   # anchor-owned SA (not declared in config
 # tests/test_anchor.py::test_engine_and_script_agree_on_the_scope_reader_role.
 SCOPE_READER_ROLE_ID = "jgdScopeIamViewer"
 
+# The fleet provisioner's service-account admin: roles/iam.serviceAccountAdmin minus
+# iam.serviceAccounts.delete/undelete/disable, an org custom role defined by fleet-anchor.sh and
+# NOT listed in provisioner-roles.txt (that file is also read per project, where it does not
+# exist). Mirrors FLEET_SA_ADMIN_ROLE_ID there, tied by tests/test_anchor.py.
+FLEET_SA_ADMIN_ROLE_ID = "jgdFleetSaAdmin"
+
 
 def provisioner_kept_roles(project=None):
     """The provisioner's allowed roles — single source of truth shared with anchor.sh.
@@ -970,7 +976,8 @@ def _audit_scope_grants(email, scope, keep):
     a human decides.
     """
     print(f"audit provisioner grants at {scope}:")
-    allowed = set(keep) | {f"{scope}/roles/{SCOPE_READER_ROLE_ID}"}
+    allowed = set(keep) | {f"{scope}/roles/{SCOPE_READER_ROLE_ID}",
+                           f"{scope}/roles/{FLEET_SA_ADMIN_ROLE_ID}"}
     live = _scope_roles(scope, email)
     if not live:
         # Not 'clean': the SA is supposed to hold its predefined roles here. Empty means

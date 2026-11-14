@@ -220,13 +220,14 @@ def test_prune_service_accounts_noop_when_matching():
 
 def test_prune_provisioner_keeps_kept_removes_rest():
     live = "\n".join([
-        "roles/iam.serviceAccountAdmin",
+        "roles/iam.serviceAccountAdmin",    # no longer kept: the fleet SA holds jgdFleetSaAdmin instead
         "roles/resourcemanager.projectIamAdmin",
         "roles/iam.workloadIdentityPoolAdmin",
         "roles/monitoring.editor",          # stale over-grant
         "roles/pubsub.editor",              # stale over-grant
     ])
     out = drive(P.prune_provisioner, {}, lambda args: live)
+    assert "would unbind roles/iam.serviceAccountAdmin from infra-provisioner" in out
     assert "would unbind roles/monitoring.editor from infra-provisioner" in out
     assert "would unbind roles/pubsub.editor from infra-provisioner" in out
     assert "keep roles/resourcemanager.projectIamAdmin" in out
@@ -236,7 +237,6 @@ def test_prune_provisioner_keeps_kept_removes_rest():
 
 def test_provisioner_kept_roles_reads_shared_file():
     assert P.provisioner_kept_roles("p") == {
-        "roles/iam.serviceAccountAdmin",
         "roles/resourcemanager.projectIamAdmin",
         "roles/iam.workloadIdentityPoolAdmin",
         "projects/p/roles/jgdSecretIamAdmin",
@@ -774,21 +774,36 @@ def _fleet_gmap(scope_roles):
 
 def test_scope_audit_reports_kept_roles_and_does_not_prune_them():
     out = drive(P.prune_provisioner, FLEET_CFG, _fleet_gmap([
-        "roles/iam.serviceAccountAdmin",
+        "organizations/250926570441/roles/jgdFleetSaAdmin",
         "roles/resourcemanager.projectIamAdmin",
         "roles/iam.workloadIdentityPoolAdmin",
         "organizations/250926570441/roles/jgdScopeIamViewer"]))
     assert "audit provisioner grants at organizations/250926570441" in out, out
+    assert "keep organizations/250926570441/roles/jgdFleetSaAdmin" in out, out
+    assert "UNDECLARED" not in out, out
     assert "keep roles/resourcemanager.projectIamAdmin" in out, out
     assert "jgdScopeIamViewer" in out, out
     # an empty project policy is EXPECTED here and must not read as a skip/failure
     assert "no project-level roles (expected" in out, out
 
 
+def test_scope_audit_flags_the_old_predefined_sa_admin_as_undeclared():
+    """After the re-anchor the fleet SA must not still hold roles/iam.serviceAccountAdmin (it can
+    delete service accounts): a leftover binding is drift the audit reports and fails on."""
+    try:
+        out = drive(P.prune_provisioner, FLEET_CFG, _fleet_gmap([
+            "organizations/250926570441/roles/jgdFleetSaAdmin",
+            "roles/iam.serviceAccountAdmin"]))
+    except SystemExit as e:
+        assert "undeclared role roles/iam.serviceAccountAdmin" in str(e), e
+    else:
+        raise AssertionError("a leftover serviceAccountAdmin passed the scope audit:\n" + out)
+
+
 def test_scope_audit_flags_an_undeclared_role_and_refuses_to_remove_it():
     try:
         out = drive(P.prune_provisioner, FLEET_CFG, _fleet_gmap([
-            "roles/iam.serviceAccountAdmin",
+            "organizations/250926570441/roles/jgdFleetSaAdmin",
             "roles/owner"]))
     except SystemExit as e:
         assert "undeclared" in str(e), e
@@ -809,9 +824,9 @@ def test_scope_audit_treats_an_empty_scope_policy_as_an_error_not_as_clean():
 
 
 def test_per_project_provisioner_is_unchanged_by_the_fleet_support():
-    live = ["roles/iam.serviceAccountAdmin", "roles/editor"]
+    live = ["roles/resourcemanager.projectIamAdmin", "roles/editor"]
     out = drive(P.prune_provisioner, {}, lambda args: "\n".join(live))
-    assert "keep roles/iam.serviceAccountAdmin" in out, out
+    assert "keep roles/resourcemanager.projectIamAdmin" in out, out
     assert "roles/editor" in out, out
     assert "audit provisioner grants" not in out, "no scope configured; must not audit"
 
