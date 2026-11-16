@@ -152,7 +152,7 @@ binding somewhere unintended. Two more kinds carry their location the same way:
 | Kind | Key | Shape rule | How it is addressed |
 |---|---|---|---|
 | `run_services` | `<region>/<service>` | exactly one `/`, both parts non-empty, else fail loud | `gcloud run services <verb> <service> --region <region> --project <project>` (`describe` refuses a full resource name: "You must specify a region") |
-| `kms_keys` | `<location>/<keyring>/<key>` | exactly two `/`, all parts non-empty, else fail loud | `gcloud kms keys <verb> projects/<p>/locations/<l>/keyRings/<k>/cryptoKeys/<c>` — the full name carries the project, so no `--project` (like GAR) |
+| `kms_keys` | `<location>/<keyring>/<key>` | exactly two `/`, all parts non-empty, else fail loud | `gcloud kms keys <verb> projects/<p>/locations/<l>/keyRings/<k>/cryptoKeys/<c>` — the full name carries the project, so the read args have no `--project` (like GAR; binding mutations still get it from `gcloud()`) |
 
 An absent Cloud Run service (`Cannot find service`) or key (`NOT_FOUND`) fails loud like any
 other absent resource. Neither kind is allowed under `principals:` (that stays limited to

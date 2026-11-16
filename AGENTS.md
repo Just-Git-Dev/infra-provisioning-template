@@ -38,7 +38,7 @@ which pins a **full commit SHA**, not `@v1`.
   `<location>/<repo>`; `run_services` is `<region>/<service>` (exactly one `/`; gcloud args
   `run services <verb> <service> --region <region> --project <p>`, because `describe` refuses a
   full resource name; absent marker `Cannot find service`); `kms_keys` is
-  `<location>/<keyring>/<key>` (exactly two `/`; full-name ref, no `--project`). A malformed key
+  `<location>/<keyring>/<key>` (exactly two `/`; full-name ref, no `--project` in the read args). A malformed key
   fails loud. Every kind needs a `_FOREIGN_ROLES` entry (empty set for these two). Neither is
   allowed under `principals:` (ADR-008). Their grants need the project-scoped custom role
   `jgdResourceIamAdmin` (listed in `bootstrap/provisioner-roles.txt`, twin of `jgdSecretIamAdmin`).

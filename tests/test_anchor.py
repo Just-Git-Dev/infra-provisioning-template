@@ -233,6 +233,29 @@ def test_jgdFleetSaAdmin_permissions_exact():
         assert perms == FLEET_SA_ADMIN_PERMS, (mode, sorted(perms ^ FLEET_SA_ADMIN_PERMS))
 
 
+RESOURCE_IAM_ADMIN_PERMS = {
+    "%s.%s" % (res, verb)
+    for res in ("run.services", "pubsub.topics", "cloudkms.cryptoKeys")
+    for verb in ("get", "getIamPolicy", "setIamPolicy")
+}
+
+
+def _custom_role_perms(script, role):
+    """The perms= string of `role`'s case in a bootstrap script, as a set."""
+    text = open(os.path.join(ROOT, "bootstrap", script)).read()
+    case = text.split("    %s)\n" % role, 1)[1].split(";;", 1)[0]
+    return set(case.split('perms="', 1)[1].split('"', 1)[0].split(","))
+
+
+def test_jgdResourceIamAdmin_permissions_exact_in_both_anchors():
+    # A typo in a permission name passes every dry-run and only fails on the live
+    # `roles create`, so pin the exact nine in both reference scripts.
+    assert len(RESOURCE_IAM_ADMIN_PERMS) == 9
+    for script in ("anchor.sh", "fleet-anchor.sh"):
+        perms = _custom_role_perms(script, "jgdResourceIamAdmin")
+        assert perms == RESOURCE_IAM_ADMIN_PERMS, (script, sorted(perms ^ RESOURCE_IAM_ADMIN_PERMS))
+
+
 def test_provisioner_role_set_holds_no_sa_delete_undelete_or_disable():
     kept = _provisioner_role_lines()
     for bad in ("roles/iam.serviceAccountAdmin", "roles/owner", "roles/editor",

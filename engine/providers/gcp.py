@@ -39,7 +39,7 @@ def gcloud(args, project=None, check=True):
 # gcloud stderr fragments that genuinely mean "the resource is absent" (an expected
 # result → '') as opposed to a real failure (auth/permission/network/transient).
 _ABSENT_MARKERS = ("NOT_FOUND", "was not found", "does not exist",
-                   "Listed 0 items", "could not be found", "Cannot find service")
+                   "Listed 0 items", "could not be found", "Cannot find service [")
 
 
 def gout(args, project=None):
