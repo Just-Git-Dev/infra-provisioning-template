@@ -240,6 +240,7 @@ def test_provisioner_kept_roles_reads_shared_file():
         "roles/resourcemanager.projectIamAdmin",
         "roles/iam.workloadIdentityPoolAdmin",
         "projects/p/roles/jgdSecretIamAdmin",
+        "projects/p/roles/jgdResourceIamAdmin",
     }
 
 

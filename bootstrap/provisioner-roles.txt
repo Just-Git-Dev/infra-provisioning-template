@@ -36,3 +36,9 @@ roles/iam.workloadIdentityPoolAdmin
 # one CREATED secrets. This one cannot create, delete, or read one; it only manages
 # who may access them.
 projects/{project}/roles/jgdSecretIamAdmin
+
+# jgdResourceIamAdmin: manage WHO may access a Cloud Run service, Pub/Sub topic or KMS key
+# (resource_roles run_services / pubsub_topics / kms_keys): get + getIamPolicy +
+# setIamPolicy per kind and nothing else. It cannot create, delete, deploy, invoke, publish
+# or use a key. Created/reconciled by the anchor scripts.
+projects/{project}/roles/jgdResourceIamAdmin

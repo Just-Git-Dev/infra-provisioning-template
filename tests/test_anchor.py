@@ -64,7 +64,8 @@ def test_dry_run_announces_every_would_change():
         out, _ = run_anchor(script, env)
         would = [ln for ln in out.splitlines() if "would:" in ln]
         assert would, f"{script} planned nothing at all — the stub should make everything absent"
-        for needle in ("roles create jgdSecretIamAdmin", "add-iam-policy-binding"):
+        for needle in ("roles create jgdSecretIamAdmin", "roles create jgdResourceIamAdmin",
+                       "add-iam-policy-binding"):
             assert any(needle in ln for ln in would), \
                 f"{script}: no `~ would:` line for '{needle}' (swallowed by a redirect?)"
 
@@ -112,6 +113,10 @@ def test_scope_reach_still_binds_project_scoped_custom_role():
             "custom role cannot be granted at folder/org scope, so it must still be bound "
             "per-project — otherwise resource_roles.secrets fails PERMISSION_DENIED "
             "fleet-wide after cutover.\n%s" % (mode, out))
+        needle = "projects/%s/roles/jgdResourceIamAdmin" % TARGET
+        assert needle in out, (
+            "REACH=%s: no per-project jgdResourceIamAdmin binding planned (resource_roles "
+            "run_services/pubsub_topics/kms_keys would fail PERMISSION_DENIED).\n%s" % (mode, out))
 
 
 def test_scope_reach_does_not_grant_custom_role_at_scope():

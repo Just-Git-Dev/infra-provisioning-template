@@ -39,7 +39,7 @@ def gcloud(args, project=None, check=True):
 # gcloud stderr fragments that genuinely mean "the resource is absent" (an expected
 # result → '') as opposed to a real failure (auth/permission/network/transient).
 _ABSENT_MARKERS = ("NOT_FOUND", "was not found", "does not exist",
-                   "Listed 0 items", "could not be found")
+                   "Listed 0 items", "could not be found", "Cannot find service")
 
 
 def gout(args, project=None):
@@ -470,7 +470,40 @@ _RESOURCE_KINDS = {
         "ref": lambda name, project: _gar_ref(name, project),
         "args": lambda verb, ref, project: ["artifacts", "repositories", verb, ref],
     },
+    # Cloud Run services and KMS keys are location-scoped too. Cloud Run's gcloud takes
+    # `<service> --region R` (key `<region>/<service>`); KMS takes a fully-qualified key path
+    # (key `<location>/<keyring>/<key>`), which encodes the project, so no `--project`.
+    "run_services": {
+        "noun": "Cloud Run service",
+        "ref": lambda name, project: _run_ref(name),
+        "args": lambda verb, ref, project: ["run", "services", verb, ref[1], "--region", ref[0],
+                                            "--project", project],
+    },
+    "kms_keys": {
+        "noun": "KMS key",
+        "ref": lambda name, project: _kms_ref(name, project),
+        "args": lambda verb, ref, project: ["kms", "keys", verb, ref],
+    },
 }
+
+
+def _run_ref(name):
+    parts = name.split("/")
+    if len(parts) != 2 or not all(parts):
+        raise SystemExit(
+            f"resource_roles run_services: {name!r} must be '<region>/<service>' "
+            f"(e.g. 'asia-southeast1/my-service'); Cloud Run services are per-region.")
+    return (parts[0], parts[1])
+
+
+def _kms_ref(name, project):
+    parts = name.split("/")
+    if len(parts) != 3 or not all(parts):
+        raise SystemExit(
+            f"resource_roles kms_keys: {name!r} must be '<location>/<keyring>/<key>' "
+            f"(e.g. 'asia-southeast1/my-ring/my-key').")
+    location, ring, key = parts
+    return f"projects/{project}/locations/{location}/keyRings/{ring}/cryptoKeys/{key}"
 
 
 def _gar_ref(name, project):
@@ -496,6 +529,8 @@ _FOREIGN_ROLES = {
     "pubsub_topics": set(),
     "pubsub_subscriptions": set(),
     "artifact_repositories": set(),
+    "run_services": set(),
+    "kms_keys": set(),
 }
 
 

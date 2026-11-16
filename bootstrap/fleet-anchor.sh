@@ -165,6 +165,13 @@ ensure_custom_role(){ # proj role_id
       title="JGD Secret IAM Admin"
       desc="Manage WHO may access a secret. Cannot create, delete, or read one (no versions.access). Held by the provisioner SA so resource_roles.secrets can bind. | $PROVENANCE"
       ;;
+    jgdResourceIamAdmin)
+      # Exactly what the engine needs to manage IAM ON a Cloud Run service, Pub/Sub topic or
+      # KMS key (resource_roles run_services / pubsub_topics / kms_keys), and nothing more.
+      perms="run.services.get,run.services.getIamPolicy,run.services.setIamPolicy,pubsub.topics.get,pubsub.topics.getIamPolicy,pubsub.topics.setIamPolicy,cloudkms.cryptoKeys.get,cloudkms.cryptoKeys.getIamPolicy,cloudkms.cryptoKeys.setIamPolicy"
+      title="JGD Resource IAM Admin"
+      desc="Manage WHO may access a Cloud Run service, Pub/Sub topic or KMS key. Cannot create, delete, deploy, invoke, publish or use a key. Held by the provisioner SA so resource_roles can bind. | $PROVENANCE"
+      ;;
     *)
       err "provisioner-roles.txt names custom role '$id', which this script does not define"
       return 1
