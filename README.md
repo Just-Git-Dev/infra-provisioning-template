@@ -139,12 +139,26 @@ service_accounts:
       pubsub_topics:         { orders.created: [pubsub.publisher] }
       pubsub_subscriptions:  { orders-worker-sub: [pubsub.subscriber] }
       artifact_repositories: { asia-southeast1/backend: [artifactregistry.writer] }
+      run_services:          { asia-south1/api: [run.invoker] }
+      kms_keys:              { global/my-ring/my-key: [cloudkms.cryptoKeyEncrypterDecrypter] }
 ```
 
-Supported kinds: `service_accounts`, `secrets`, `pubsub_topics`, `pubsub_subscriptions` and
-`artifact_repositories`. An Artifact Registry repository is per-location and a bare name is
-ambiguous to `gcloud`, so its key carries one: **`<location>/<repo>`** — a name without a
-location fails loud at plan time rather than binding somewhere unintended.
+Supported kinds: `service_accounts`, `secrets`, `pubsub_topics`, `pubsub_subscriptions`,
+`artifact_repositories`, `run_services` and `kms_keys`. An Artifact Registry repository is
+per-location and a bare name is ambiguous to `gcloud`, so its key carries one:
+**`<location>/<repo>`** — a name without a location fails loud at plan time rather than
+binding somewhere unintended. Two more kinds carry their location the same way:
+
+| Kind | Key | Shape rule | How it is addressed |
+|---|---|---|---|
+| `run_services` | `<region>/<service>` | exactly one `/`, both parts non-empty, else fail loud | `gcloud run services <verb> <service> --region <region> --project <project>` (`describe` refuses a full resource name: "You must specify a region") |
+| `kms_keys` | `<location>/<keyring>/<key>` | exactly two `/`, all parts non-empty, else fail loud | `gcloud kms keys <verb> projects/<p>/locations/<l>/keyRings/<k>/cryptoKeys/<c>` — the full name carries the project, so the read args have no `--project` (like GAR; binding mutations still get it from `gcloud()`) |
+
+An absent Cloud Run service (`Cannot find service`) or key (`NOT_FOUND`) fails loud like any
+other absent resource. Neither kind is allowed under `principals:` (that stays limited to
+`service_accounts`, ADR-008), and pruning follows the other kinds: only declared SAs and
+`deleted:` members are removed, so e.g. `allUsers` with `roles/run.invoker` is never touched.
+Both need the `jgdResourceIamAdmin` custom role (see Safety notes).
 The engine **binds** on these resources and
 never creates them — a resource that does not exist fails loud rather than being skipped,
 because a silent skip would make a clean plan a lie. `--prune` removes undeclared bindings
@@ -345,6 +359,12 @@ Edit the `PROVISIONER_REPO` / `PROJECTS` placeholders (or set `PROVISIONER_REPO`
   the identity broker read every secret **payload** in the fleet. The custom role can neither
   create, delete, nor read a secret — only manage who may access one. The anchor scripts create
   and reconcile it.
+  `jgdResourceIamAdmin` is its twin for the other resource kinds that need it: nine permissions,
+  `get`/`getIamPolicy`/`setIamPolicy` on each of `run.services`, `pubsub.topics` and
+  `cloudkms.cryptoKeys` (what `resource_roles.run_services`, `.pubsub_topics` and `.kms_keys`
+  need). Project-scoped, so the org scope audit is unaffected. Trade-off: `setIamPolicy` on a
+  resource lets the provisioner grant ANY role on it, and the `grantable-roles.txt` condition
+  does not reach resource-level grants (same as secrets).
 - **`principals` is guarded by a FILE, not by IAM.** `modifiedGrantsByRole` — the IAM Condition
   behind `grantable-roles.txt` — applies to **project/folder/org** allow policies only. A
   service-account resource policy has no equivalent attribute, so the provisioner's

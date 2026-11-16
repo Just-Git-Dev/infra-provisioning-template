@@ -64,7 +64,8 @@ def test_dry_run_announces_every_would_change():
         out, _ = run_anchor(script, env)
         would = [ln for ln in out.splitlines() if "would:" in ln]
         assert would, f"{script} planned nothing at all — the stub should make everything absent"
-        for needle in ("roles create jgdSecretIamAdmin", "add-iam-policy-binding"):
+        for needle in ("roles create jgdSecretIamAdmin", "roles create jgdResourceIamAdmin",
+                       "add-iam-policy-binding"):
             assert any(needle in ln for ln in would), \
                 f"{script}: no `~ would:` line for '{needle}' (swallowed by a redirect?)"
 
@@ -112,6 +113,10 @@ def test_scope_reach_still_binds_project_scoped_custom_role():
             "custom role cannot be granted at folder/org scope, so it must still be bound "
             "per-project — otherwise resource_roles.secrets fails PERMISSION_DENIED "
             "fleet-wide after cutover.\n%s" % (mode, out))
+        needle = "projects/%s/roles/jgdResourceIamAdmin" % TARGET
+        assert needle in out, (
+            "REACH=%s: no per-project jgdResourceIamAdmin binding planned (resource_roles "
+            "run_services/pubsub_topics/kms_keys would fail PERMISSION_DENIED).\n%s" % (mode, out))
 
 
 def test_scope_reach_does_not_grant_custom_role_at_scope():
@@ -226,6 +231,29 @@ def test_jgdFleetSaAdmin_permissions_exact():
         out, _ = run_anchor("fleet-anchor.sh", dict(env, HOST_PROJECT="host-project"))
         perms = _fleet_sa_admin_perms(out)
         assert perms == FLEET_SA_ADMIN_PERMS, (mode, sorted(perms ^ FLEET_SA_ADMIN_PERMS))
+
+
+RESOURCE_IAM_ADMIN_PERMS = {
+    "%s.%s" % (res, verb)
+    for res in ("run.services", "pubsub.topics", "cloudkms.cryptoKeys")
+    for verb in ("get", "getIamPolicy", "setIamPolicy")
+}
+
+
+def _custom_role_perms(script, role):
+    """The perms= string of `role`'s case in a bootstrap script, as a set."""
+    text = open(os.path.join(ROOT, "bootstrap", script)).read()
+    case = text.split("    %s)\n" % role, 1)[1].split(";;", 1)[0]
+    return set(case.split('perms="', 1)[1].split('"', 1)[0].split(","))
+
+
+def test_jgdResourceIamAdmin_permissions_exact_in_both_anchors():
+    # A typo in a permission name passes every dry-run and only fails on the live
+    # `roles create`, so pin the exact nine in both reference scripts.
+    assert len(RESOURCE_IAM_ADMIN_PERMS) == 9
+    for script in ("anchor.sh", "fleet-anchor.sh"):
+        perms = _custom_role_perms(script, "jgdResourceIamAdmin")
+        assert perms == RESOURCE_IAM_ADMIN_PERMS, (script, sorted(perms ^ RESOURCE_IAM_ADMIN_PERMS))
 
 
 def test_provisioner_role_set_holds_no_sa_delete_undelete_or_disable():
