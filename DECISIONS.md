@@ -5,8 +5,9 @@ the alternatives were. Newest first.
 
 ## Index
 
-26 entries. Newest first.
+27 entries. Newest first.
 
+- [2026-11-16 — resource_roles gains run_services and kms_keys; jgdResourceIamAdmin custom role](#2026-11-16--resource_roles-gains-run_services-and-kms_keys-jgdresourceiamadmin-custom-role)
 - [2026-11-14 — Fleet provisioner loses service-account delete: jgdFleetSaAdmin replaces iam.serviceAccountAdmin](#2026-11-14--fleet-provisioner-loses-service-account-delete-jgdfleetsaadmin-replaces-iamserviceaccountadmin)
 - [2026-11-14 — prune_wif owns workloadIdentityUser; human_managed_roles are declared, never granted](#2026-11-14--prune_wif-owns-workloadidentityuser-human_managed_roles-are-declared-never-granted)
 - [2026-11-13 — SA retirement: `retire: true`, a `--retire` deleter mode, orphan and stray-role detection](#2026-11-13--sa-retirement-retire-true-a---retire-deleter-mode-orphan-and-stray-role-detection)
@@ -33,6 +34,16 @@ the alternatives were. Newest first.
 - [2026-08-21 — caller inputs move to `env:`; CI grows actionlint and lints `action.yml` itself](#2026-08-21--caller-inputs-move-to-env-ci-grows-actionlint-and-lints-actionyml-itself)
 - [2026-08-20 — SHA-pin this repo's own actions and enforce it in CI](#2026-08-20--sha-pin-this-repos-own-actions-and-enforce-it-in-ci)
 - [2026-08-20 — port the two mutation-path engine fixes from the consumer; release v1.0.1](#2026-08-20--port-the-two-mutation-path-engine-fixes-from-the-consumer-release-v101)
+
+## 2026-11-16 — resource_roles gains run_services and kms_keys; jgdResourceIamAdmin custom role
+
+**Context.** Per-resource grants on Cloud Run services and KMS keys were made by hand-run project bootstrap scripts, invisible to the plan and to zero-drift. Two new `resource_roles` kinds move them into config so those scripts can stop making them.
+
+**Decision.** `run_services`, key `<region>/<service>` (exactly one `/`, both parts non-empty). It uses `gcloud run services <verb> <service> --region <region> --project <p>` because `describe` refuses a full resource name ("You must specify a region"). `kms_keys`, key `<location>/<keyring>/<key>` (exactly two `/`, all non-empty), addressed by the full `projects/<p>/locations/<l>/keyRings/<k>/cryptoKeys/<c>` name with no `--project`, like GAR. A malformed key fails loud. New absent marker `"Cannot find service"` (Cloud Run does not say NOT_FOUND); KMS already matches `NOT_FOUND`. Both get an empty `_FOREIGN_ROLES` entry and are NOT allowed under `principals:` (ADR-008 stays limited to service accounts). Pruning is unchanged: only declared SAs and `deleted:` members, so `allUsers` with `roles/run.invoker` is never touched.
+
+**Custom role.** `projects/{project}/roles/jgdResourceIamAdmin`, twin of `jgdSecretIamAdmin`, listed in `bootstrap/provisioner-roles.txt` so `--prune provisioner` and the scope audit keep it. Nine permissions: `run.services.{get,getIamPolicy,setIamPolicy}`, `pubsub.topics.{get,getIamPolicy,setIamPolicy}`, `cloudkms.cryptoKeys.{get,getIamPolicy,setIamPolicy}`. Project-scoped, so the org scope audit is unaffected.
+
+**Trade-off.** `setIamPolicy` on a resource lets the provisioner grant ANY role on that resource, and the `grantable-roles.txt` conditions do not reach resource-level grants (same as secrets today). The provisioner already holds conditional project IAM admin, so this widens reach, not trust tier.
 
 ## 2026-11-14 — Fleet provisioner loses service-account delete: jgdFleetSaAdmin replaces iam.serviceAccountAdmin
 

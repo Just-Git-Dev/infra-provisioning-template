@@ -636,7 +636,8 @@ def test_prune_provisioner_keeps_the_custom_secret_role():
 
 def test_resource_kinds_cover_pubsub_and_artifact_registry():
     assert set(P._RESOURCE_KINDS) == {"secrets", "service_accounts", "pubsub_topics",
-                                      "pubsub_subscriptions", "artifact_repositories"}
+                                      "pubsub_subscriptions", "artifact_repositories",
+                                      "run_services", "kms_keys"}
     # every kind must declare a foreign-role set, or prune_resource_roles KeyErrors on it
     assert set(P._FOREIGN_ROLES) == set(P._RESOURCE_KINDS)
 
@@ -733,6 +734,127 @@ def test_resource_policy_ignores_an_empty_policy():
     GAR repos and on an unbound subscription). Split naively that becomes a ('', '') pair."""
     P.gout = lambda args, project=None: ","
     assert P.resource_policy("secrets", "s", "p") == []
+
+
+# ── resource_roles: Cloud Run services + KMS keys (2026-11-16) ───────────────
+# `run_services` key is `<region>/<service>`: `gcloud run services describe` refuses a full
+# resource name ("You must specify a region"), so the args carry `--region`. `kms_keys` key is
+# `<location>/<keyring>/<key>`, addressed by full name with no --project (like GAR).
+
+def _rr_cfg(kind, key, role):
+    return {"service_accounts": [{"name": "api-run",
+                                  "resource_roles": {kind: {key: [role]}}}]}
+
+
+def _drive_absent(handler, cfg, stderr):
+    """Run a handler through the REAL gout, with gcloud failing as a missing resource does."""
+    core.DRY = True
+    P.gout = _ORIG_GOUT
+    P.gcloud = _raise_gcloud(stderr)
+    with redirect_stdout(io.StringIO()):
+        handler(cfg, "p")
+
+
+def _expect_exit(fn, *needles, forbid="unknown resource_roles kind"):
+    try:
+        fn()
+    except SystemExit as e:
+        # a kind the registry does not know also exits loud; that is not the exit under test
+        assert forbid not in str(e), f"kind not registered: {str(e)!r}"
+        for n in needles:
+            assert n in str(e), f"{n!r} not in {str(e)!r}"
+    else:
+        raise AssertionError("expected a loud exit")
+
+
+def test_resource_roles_run_service_uses_region_flag():
+    seen = []
+
+    def gmap(args):
+        seen.append(args)
+        return "exists" if "describe" in args else ""
+
+    out = drive(P.ensure_resource_roles,
+                _rr_cfg("run_services", "asia-south1/api", "run.invoker"), gmap)
+    assert seen[0] == ["run", "services", "describe", "api",
+                       "--region", "asia-south1", "--project", "p"]
+    assert "would" in out and "roles/run.invoker" in out and "asia-south1/api" in out
+
+
+def test_resource_roles_run_service_absent_fails_loud():
+    """Cloud Run says `Cannot find service [x]`, not NOT_FOUND, so it needs its own marker."""
+    _expect_exit(lambda: _drive_absent(
+        P.ensure_resource_roles, _rr_cfg("run_services", "asia-south1/api", "run.invoker"),
+        "ERROR: (gcloud.run.services.describe) Cannot find service [api]"),
+        "does not exist")
+
+
+def test_resource_roles_run_service_key_shape_fails_loud():
+    for key in ("api", "a/b/c", "/api", "asia-south1/"):
+        _expect_exit(lambda k=key: drive(P.ensure_resource_roles,
+                                         _rr_cfg("run_services", k, "run.invoker"),
+                                         lambda args: "exists"),
+                     "run_services")
+
+
+def test_resource_roles_kms_key_builds_a_qualified_ref():
+    seen = []
+
+    def gmap(args):
+        seen.append(args)
+        return "exists" if "describe" in args else ""
+
+    out = drive(P.ensure_resource_roles,
+                _rr_cfg("kms_keys", "global/my-ring/my-key",
+                        "cloudkms.cryptoKeyEncrypterDecrypter"), gmap)
+    assert seen[0] == ["kms", "keys", "describe",
+                       "projects/p/locations/global/keyRings/my-ring/cryptoKeys/my-key"]
+    assert "--project" not in seen[0]
+    assert "would" in out and "global/my-ring/my-key" in out
+
+
+def test_resource_roles_kms_key_shape_fails_loud():
+    for key in ("my-key", "global/my-key", "a/b/c/d", "global//my-key", "global/my-ring/"):
+        _expect_exit(lambda k=key: drive(P.ensure_resource_roles,
+                                         _rr_cfg("kms_keys", k, "cloudkms.admin"),
+                                         lambda args: "exists"),
+                     "kms_keys")
+
+
+def test_resource_roles_kms_key_absent_fails_loud():
+    _expect_exit(lambda: _drive_absent(
+        P.ensure_resource_roles,
+        _rr_cfg("kms_keys", "global/my-ring/my-key", "cloudkms.admin"),
+        "ERROR: (gcloud.kms.keys.describe) NOT_FOUND: CryptoKey not found"),
+        "does not exist")
+
+
+def test_prune_resource_roles_on_run_service_keeps_allusers():
+    cfg = {"service_accounts": [
+        {"name": "deployer", "resource_roles": {"run_services": {"asia-south1/api": ["run.admin"]}}},
+        {"name": "api-run"},
+    ]}
+    live = ("roles/run.admin,serviceAccount:deployer@p.iam.gserviceaccount.com\n"
+            "roles/run.invoker,serviceAccount:api-run@p.iam.gserviceaccount.com\n"
+            "roles/run.invoker,allUsers")
+    out = drive(P.prune_resource_roles, cfg, lambda args: live)
+    assert "would unbind roles/run.invoker" in out and "from api-run" in out
+    assert "allUsers" not in out
+    assert out.count("unbind") == 1
+
+
+def test_principals_refuse_run_services_and_kms_keys():
+    """ADR-008: humans are bound on service accounts only. Guard test: already true today
+    (any kind but service_accounts is refused), must stay true once the kinds exist."""
+    for kind, res in (("run_services", "asia-south1/api"),
+                      ("kms_keys", "global/my-ring/my-key")):
+        cfg = _principals_cfg(kind=kind, resource=res)
+        _expect_exit(lambda c=cfg: drive(P.ensure_principals, c, lambda args: "exists"),
+                     kind)
+
+
+def test_provisioner_kept_roles_include_the_resource_iam_role():
+    assert "projects/p/roles/jgdResourceIamAdmin" in P.provisioner_kept_roles("p")
 
 
 # This block MUST stay at the very END of the file: it snapshots globals() at the moment it

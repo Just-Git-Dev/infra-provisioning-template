@@ -34,6 +34,14 @@ which pins a **full commit SHA**, not `@v1`.
   single SA) and deliberately does NOT create one — an absent target fails loud. Adding a
   handler that CREATES an app-owned resource crosses the ADR-001 line and needs a decision,
   not just a commit; `tests/test_engine.py::test_handlers_are_access_only` guards the set.
+- **`resource_roles` kinds with a location in the key.** `artifact_repositories` is
+  `<location>/<repo>`; `run_services` is `<region>/<service>` (exactly one `/`; gcloud args
+  `run services <verb> <service> --region <region> --project <p>`, because `describe` refuses a
+  full resource name; absent marker `Cannot find service`); `kms_keys` is
+  `<location>/<keyring>/<key>` (exactly two `/`; full-name ref, no `--project`). A malformed key
+  fails loud. Every kind needs a `_FOREIGN_ROLES` entry (empty set for these two). Neither is
+  allowed under `principals:` (ADR-008). Their grants need the project-scoped custom role
+  `jgdResourceIamAdmin` (listed in `bootstrap/provisioner-roles.txt`, twin of `jgdSecretIamAdmin`).
 - **`prune_wif` owns `workloadIdentityUser`; the own-pool prefix is the ownership proof.** It
   removes a member only from a DECLARED SA, only if the member starts with THIS project's pool
   prefix (`principal[Set]://iam.googleapis.com/projects/<num>/locations/global/workloadIdentityPools/<pool>/`),
