@@ -910,7 +910,8 @@ def test_resource_roles_cloudtasks_queue_absent_fails_loud():
         P.ensure_resource_roles,
         _rr_cfg("cloudtasks_queues", "asia-south1/q", "cloudtasks.enqueuer"),
         "ERROR: (gcloud.tasks.queues.describe) NOT_FOUND: Queue does not exist."),
-        "does not exist")
+        # unique to the engine's absent path; the stub stderr alone contains "does not exist"
+        "Cloud Tasks queue 'asia-south1/q' does not exist")
 
 
 def test_resource_roles_cloudtasks_queue_key_shape_fails_loud():
