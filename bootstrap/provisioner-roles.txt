@@ -37,8 +37,9 @@ roles/iam.workloadIdentityPoolAdmin
 # who may access them.
 projects/{project}/roles/jgdSecretIamAdmin
 
-# jgdResourceIamAdmin: manage WHO may access a Cloud Run service, Pub/Sub topic or KMS key
-# (resource_roles run_services / pubsub_topics / kms_keys): get + getIamPolicy +
+# jgdResourceIamAdmin: manage WHO may access a Cloud Run service or job, Pub/Sub topic, KMS key
+# or Cloud Tasks queue (resource_roles run_services / run_jobs / pubsub_topics / kms_keys /
+# cloudtasks_queues): get + getIamPolicy +
 # setIamPolicy per kind and nothing else. It cannot create, delete, deploy, invoke, publish
 # or use a key. Created/reconciled by the anchor scripts.
 projects/{project}/roles/jgdResourceIamAdmin

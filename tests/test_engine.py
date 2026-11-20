@@ -638,7 +638,8 @@ def test_prune_provisioner_keeps_the_custom_secret_role():
 def test_resource_kinds_cover_pubsub_and_artifact_registry():
     assert set(P._RESOURCE_KINDS) == {"secrets", "service_accounts", "pubsub_topics",
                                       "pubsub_subscriptions", "artifact_repositories",
-                                      "run_services", "kms_keys"}
+                                      "run_services", "kms_keys", "run_jobs",
+                                      "cloudtasks_queues"}
     # every kind must declare a foreign-role set, or prune_resource_roles KeyErrors on it
     assert set(P._FOREIGN_ROLES) == set(P._RESOURCE_KINDS)
 
@@ -849,6 +850,96 @@ def test_principals_refuse_run_services_and_kms_keys():
     (any kind but service_accounts is refused), must stay true once the kinds exist."""
     for kind, res in (("run_services", "asia-south1/api"),
                       ("kms_keys", "global/my-ring/my-key")):
+        cfg = _principals_cfg(kind=kind, resource=res)
+        _expect_exit(lambda c=cfg: drive(P.ensure_principals, c, lambda args: "exists"),
+                     kind)
+
+
+# ── resource_roles: Cloud Run jobs + Cloud Tasks queues (2026-11-20) ─────────
+# `run_jobs` key `<region>/<job>` (same region rule as services; absent prints
+# `Cannot find job [x].`). `cloudtasks_queues` key `<location>/<queue>` (absent prints
+# `NOT_FOUND: Queue does not exist`, probed live).
+
+def test_resource_roles_run_job_uses_region_flag():
+    seen = []
+
+    def gmap(args):
+        seen.append(args)
+        return "exists" if "describe" in args else ""
+
+    out = drive(P.ensure_resource_roles,
+                _rr_cfg("run_jobs", "asia-south1/sweep", "run.jobsExecutorWithOverrides"), gmap)
+    assert seen[0] == ["run", "jobs", "describe", "sweep",
+                       "--region", "asia-south1", "--project", "p"]
+    assert "would" in out and "roles/run.jobsExecutorWithOverrides" in out \
+        and "asia-south1/sweep" in out
+
+
+def test_resource_roles_run_job_absent_fails_loud():
+    _expect_exit(lambda: _drive_absent(
+        P.ensure_resource_roles,
+        _rr_cfg("run_jobs", "asia-south1/sweep", "run.jobsExecutorWithOverrides"),
+        "ERROR: (gcloud.run.jobs.describe) Cannot find job [sweep]."),
+        "does not exist")
+
+
+def test_resource_roles_run_job_key_shape_fails_loud():
+    for key in ("sweep", "a/b/c", "/sweep", "asia-south1/"):
+        _expect_exit(lambda k=key: drive(P.ensure_resource_roles,
+                                         _rr_cfg("run_jobs", k, "run.invoker"),
+                                         lambda args: "exists"),
+                     "run_jobs")
+
+
+def test_resource_roles_cloudtasks_queue_uses_location_flag():
+    seen = []
+
+    def gmap(args):
+        seen.append(args)
+        return "exists" if "describe" in args else ""
+
+    out = drive(P.ensure_resource_roles,
+                _rr_cfg("cloudtasks_queues", "asia-south1/q", "cloudtasks.enqueuer"), gmap)
+    assert seen[0] == ["tasks", "queues", "describe", "q",
+                       "--location", "asia-south1", "--project", "p"]
+    assert "would" in out and "roles/cloudtasks.enqueuer" in out and "asia-south1/q" in out
+
+
+def test_resource_roles_cloudtasks_queue_absent_fails_loud():
+    _expect_exit(lambda: _drive_absent(
+        P.ensure_resource_roles,
+        _rr_cfg("cloudtasks_queues", "asia-south1/q", "cloudtasks.enqueuer"),
+        "ERROR: (gcloud.tasks.queues.describe) NOT_FOUND: Queue does not exist."),
+        # unique to the engine's absent path; the stub stderr alone contains "does not exist"
+        "Cloud Tasks queue 'asia-south1/q' does not exist")
+
+
+def test_resource_roles_cloudtasks_queue_key_shape_fails_loud():
+    for key in ("q", "a/b/c", "/q", "asia-south1/"):
+        _expect_exit(lambda k=key: drive(P.ensure_resource_roles,
+                                         _rr_cfg("cloudtasks_queues", k, "cloudtasks.enqueuer"),
+                                         lambda args: "exists"),
+                     "cloudtasks_queues")
+
+
+def test_prune_resource_roles_on_run_job_removes_undeclared_sa_keeps_others():
+    cfg = {"service_accounts": [
+        {"name": "sweeper",
+         "resource_roles": {"run_jobs": {"asia-south1/sweep": ["run.jobsExecutorWithOverrides"]}}},
+        {"name": "other"},
+    ]}
+    live = ("roles/run.jobsExecutorWithOverrides,serviceAccount:sweeper@p.iam.gserviceaccount.com\n"
+            "roles/run.developer,serviceAccount:other@p.iam.gserviceaccount.com\n"
+            "roles/run.developer,user:someone@example.com")
+    out = drive(P.prune_resource_roles, cfg, lambda args: live)
+    assert "would unbind roles/run.developer" in out and "from other" in out
+    assert "someone@example.com" not in out
+    assert out.count("unbind") == 1
+
+
+def test_principals_refuse_run_jobs_and_cloudtasks_queues():
+    for kind, res in (("run_jobs", "asia-south1/sweep"),
+                      ("cloudtasks_queues", "asia-south1/q")):
         cfg = _principals_cfg(kind=kind, resource=res)
         _expect_exit(lambda c=cfg: drive(P.ensure_principals, c, lambda args: "exists"),
                      kind)

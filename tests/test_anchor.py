@@ -235,7 +235,8 @@ def test_jgdFleetSaAdmin_permissions_exact():
 
 RESOURCE_IAM_ADMIN_PERMS = {
     "%s.%s" % (res, verb)
-    for res in ("run.services", "pubsub.topics", "cloudkms.cryptoKeys")
+    for res in ("run.services", "pubsub.topics", "cloudkms.cryptoKeys",
+                "run.jobs", "cloudtasks.queues")
     for verb in ("get", "getIamPolicy", "setIamPolicy")
 }
 
@@ -249,8 +250,8 @@ def _custom_role_perms(script, role):
 
 def test_jgdResourceIamAdmin_permissions_exact_in_both_anchors():
     # A typo in a permission name passes every dry-run and only fails on the live
-    # `roles create`, so pin the exact nine in both reference scripts.
-    assert len(RESOURCE_IAM_ADMIN_PERMS) == 9
+    # `roles create`, so pin the exact fifteen in both reference scripts.
+    assert len(RESOURCE_IAM_ADMIN_PERMS) == 15
     for script in ("anchor.sh", "fleet-anchor.sh"):
         perms = _custom_role_perms(script, "jgdResourceIamAdmin")
         assert perms == RESOURCE_IAM_ADMIN_PERMS, (script, sorted(perms ^ RESOURCE_IAM_ADMIN_PERMS))

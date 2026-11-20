@@ -167,10 +167,14 @@ ensure_custom_role(){ # proj role_id
       ;;
     jgdResourceIamAdmin)
       # Exactly what the engine needs to manage IAM ON a Cloud Run service, Pub/Sub topic or
-      # KMS key (resource_roles run_services / pubsub_topics / kms_keys), and nothing more.
-      perms="run.services.get,run.services.getIamPolicy,run.services.setIamPolicy,pubsub.topics.get,pubsub.topics.getIamPolicy,pubsub.topics.setIamPolicy,cloudkms.cryptoKeys.get,cloudkms.cryptoKeys.getIamPolicy,cloudkms.cryptoKeys.setIamPolicy"
+      # KMS key, Cloud Run job or Cloud Tasks queue (resource_roles run_services / pubsub_topics /
+      # kms_keys / run_jobs / cloudtasks_queues), and nothing more.
+      # NOTE (owner decision pending): cloudtasks.queues.getIamPolicy/setIamPolicy are TESTING-level;
+      # `gcloud iam roles create|update` prompts for confirmation (cancel on "n"), and if Google
+      # withdraws them this shared role stops reconciling. See DECISIONS.md 2026-11-20.
+      perms="run.services.get,run.services.getIamPolicy,run.services.setIamPolicy,pubsub.topics.get,pubsub.topics.getIamPolicy,pubsub.topics.setIamPolicy,cloudkms.cryptoKeys.get,cloudkms.cryptoKeys.getIamPolicy,cloudkms.cryptoKeys.setIamPolicy,run.jobs.get,run.jobs.getIamPolicy,run.jobs.setIamPolicy,cloudtasks.queues.get,cloudtasks.queues.getIamPolicy,cloudtasks.queues.setIamPolicy"
       title="JGD Resource IAM Admin"
-      desc="Manage WHO may access a Cloud Run service, Pub/Sub topic or KMS key. Cannot create, delete, deploy, invoke, publish or use a key. Held by the provisioner SA so resource_roles can bind. | $PROVENANCE"
+      desc="Manage WHO may access a Cloud Run service or job, Pub/Sub topic, KMS key or Cloud Tasks queue. Cannot create, delete, run, publish, enqueue or use one. Held by the provisioner SA. | $PROVENANCE"
       ;;
     *)
       err "provisioner-roles.txt names custom role '$id', which this script does not define"
