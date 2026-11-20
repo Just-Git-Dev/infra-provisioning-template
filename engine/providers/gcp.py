@@ -440,6 +440,10 @@ def ensure_act_as(cfg, project):
 #     pubsub_topics:         { booking.cancelled: [pubsub.publisher] }
 #     pubsub_subscriptions:  { poke-sub: [pubsub.subscriber] }
 #     artifact_repositories: { asia-southeast1/backend: [artifactregistry.writer] }
+#     run_services:          { asia-south1/api: [run.invoker] }
+#     kms_keys:              { global/my-ring/my-key: [cloudkms.cryptoKeyEncrypterDecrypter] }
+#     run_jobs:              { asia-south1/nightly-sweep: [run.jobsExecutorWithOverrides] }  # <region>/<job>
+#     cloudtasks_queues:     { asia-south1/sweep-queue: [cloudtasks.enqueuer] }  # <location>/<queue>
 _RESOURCE_KINDS = {
     "secrets": {
         "noun": "secret",
