@@ -19,8 +19,8 @@ import core  # noqa: E402
 from providers import gcp as P  # noqa: E402
 
 FIX = os.path.join(os.path.dirname(__file__), "fixtures")
-ORG_ROLE = "organizations/250926570441/roles/repoAdmin"
-MISSING = "organizations/250926570441/roles/noSuchRoleXyz"
+ORG_ROLE = "organizations/123456789012/roles/repoAdmin"
+MISSING = "organizations/123456789012/roles/noSuchRoleXyz"
 PROJ_ROLE = "projects/no-such-proj-zz9/roles/repoAdmin"
 
 
@@ -86,7 +86,7 @@ def test_existing_custom_role_still_plans_would_and_describe_uses_org_flag():
     lookups, _, out, msg = _run([ORG_ROLE], _exists, dry=True)
     assert msg is None, msg
     assert f"bind {ORG_ROLE}" in out, out
-    assert any("--organization=250926570441" in a for a in lookups[0]) and "repoAdmin" in lookups[0], lookups
+    assert any("--organization=123456789012" in a for a in lookups[0]) and "repoAdmin" in lookups[0], lookups
 
 
 def test_predefined_role_triggers_no_lookup():

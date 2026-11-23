@@ -26,7 +26,7 @@
 #
 # USAGE
 #   ./anchor.sh                 # ensure ALL projects in the table below
-#   ./anchor.sh automahn        # just one, by key
+#   ./anchor.sh my-proj         # just one, by key
 #   DRY_RUN=1 ./anchor.sh       # validate only: report gaps, change nothing
 #   ACCOUNT=you@x.com ./anchor.sh   # force a specific gcloud account
 #

@@ -94,10 +94,10 @@ def test_a_real_run_still_claims_and_mutates():
 # `resource_roles.secrets` then fails PERMISSION_DENIED fleet-wide after cutover, and a
 # dry-run cannot see it: the engine reports zero drift over a subsystem it cannot read.
 REACH_MODES = [
-    ("org", {"REACH": "org", "ORG_ID": "250926570441"}),
+    ("org", {"REACH": "org", "ORG_ID": "123456789012"}),
     # folder reach needs ORG_ID too: a custom role cannot be created at folder scope, so
     # jgdScopeIamViewer is defined at the org and granted at the folder.
-    ("folder", {"REACH": "folder", "FOLDER_ID": "123456789", "ORG_ID": "250926570441"}),
+    ("folder", {"REACH": "folder", "FOLDER_ID": "123456789", "ORG_ID": "123456789012"}),
 ]
 
 # The shipped template carries one placeholder row; keep the assertion derived from it
