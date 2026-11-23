@@ -7,8 +7,12 @@ SHELL := bash
 SHELLCHECK_VERSION := 0.11.0
 ACTIONLINT_VERSION := 1.7.12
 
+# Commits whose messages `make names` scans; CI sets it (empty = none). The pre-push hook pins the
+# tree to the pushed commit, so origin/main..HEAD is exactly what is being pushed.
+NAMES_RANGE ?= origin/main..HEAD
+
 # Order = CI's order. Add a check by adding a target and listing it here AND in ci.yml.
-CHECKS := venv tests tools actionlint canary shellcheck composite pinned
+CHECKS := venv tests tools actionlint canary shellcheck composite pinned names
 
 # CI runs python3.12; prefer it, then 3.13 (the laptop's python3 may be newer with no pytest).
 PYBIN := $(shell command -v python3.12 || command -v python3.13 || command -v python3)
@@ -90,3 +94,12 @@ composite: tools venv
 # Python, not `grep -P`: BSD grep has no -P, so locally the grep errored and the step still passed.
 pinned: venv
 	$(PY) scripts/check_pinned_actions.py .github/workflows action.yml
+
+# This repo is public: no consumer project, person or org id (DECISIONS 2026-11-23). The list is NOT
+# in the repo: secret NAME_DENYLIST in CI, else $$NAME_DENYLIST_FILE, else
+# ~/.config/jgd/public-denylist.txt; no list = FAIL. Prints file:line + pattern number, never the
+# text. Vendored from the fleet skill public-name-guard: never edit scripts/check_names.py here.
+# Self-test first (stdlib only, no venv), then the check.
+names:
+	$(PYBIN) scripts/test_check_names.py
+	NAMES_RANGE="$(NAMES_RANGE)" $(PYBIN) scripts/check_names.py --root .

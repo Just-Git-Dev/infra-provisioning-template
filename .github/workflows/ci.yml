@@ -101,3 +101,28 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Reject mutable action refs
         run: make pinned
+
+  # This repo is public and names no consumer project, person or org id (DECISIONS 2026-11-23).
+  # The list lives in the NAME_DENYLIST secret, never in the repo; with no secret the job FAILS
+  # (a fork PR included). It prints file:line + pattern number, never the matched text.
+  # An edited PR title/description is re-checked by pr-text.yml.
+  names:
+    name: no consumer names
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0   # the commit range below must be present
+          persist-credentials: false
+      - name: Names in files, pushed commit messages and PR text
+        env:
+          NAME_DENYLIST: ${{ secrets.NAME_DENYLIST }}
+          # PR: its commits. Push: before..sha, or none when `before` is all zeros (new ref).
+          NAMES_RANGE: >-
+            ${{ github.event_name == 'pull_request'
+                && format('{0}..{1}', github.event.pull_request.base.sha, github.event.pull_request.head.sha)
+                || (github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
+                    && format('{0}..{1}', github.event.before, github.sha) || '') }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: make names
