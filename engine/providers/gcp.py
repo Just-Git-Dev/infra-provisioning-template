@@ -39,7 +39,8 @@ def gcloud(args, project=None, check=True):
 # gcloud stderr fragments that genuinely mean "the resource is absent" (an expected
 # result → '') as opposed to a real failure (auth/permission/network/transient).
 _ABSENT_MARKERS = ("NOT_FOUND", "was not found", "does not exist",
-                   "Listed 0 items", "could not be found", "Cannot find service [")
+                   "Listed 0 items", "could not be found", "Cannot find service [",
+                   "Cannot find job [")
 
 
 def gout(args, project=None):
@@ -440,6 +441,10 @@ def ensure_act_as(cfg, project):
 #     pubsub_topics:         { booking.cancelled: [pubsub.publisher] }
 #     pubsub_subscriptions:  { poke-sub: [pubsub.subscriber] }
 #     artifact_repositories: { asia-southeast1/backend: [artifactregistry.writer] }
+#     run_services:          { asia-south1/api: [run.invoker] }
+#     kms_keys:              { global/my-ring/my-key: [cloudkms.cryptoKeyEncrypterDecrypter] }
+#     run_jobs:              { asia-south1/nightly-sweep: [run.jobsExecutorWithOverrides] }  # <region>/<job>
+#     cloudtasks_queues:     { asia-south1/sweep-queue: [cloudtasks.enqueuer] }  # <location>/<queue>
 _RESOURCE_KINDS = {
     "secrets": {
         "noun": "secret",
@@ -484,7 +489,31 @@ _RESOURCE_KINDS = {
         "ref": lambda name, project: _kms_ref(name, project),
         "args": lambda verb, ref, project: ["kms", "keys", verb, ref],
     },
+    # Cloud Run jobs take `<job> --region R` like services (key `<region>/<job>`); Cloud Tasks
+    # queues take `<queue> --location L` (key `<location>/<queue>`). An absent job prints
+    # `Cannot find job [x]` (its own marker); an absent queue prints NOT_FOUND.
+    "run_jobs": {
+        "noun": "Cloud Run job",
+        "ref": lambda name, project: _pair_ref("run_jobs", name, "<region>/<job>",
+                                               "asia-southeast1/my-job"),
+        "args": lambda verb, ref, project: ["run", "jobs", verb, ref[1], "--region", ref[0],
+                                            "--project", project],
+    },
+    "cloudtasks_queues": {
+        "noun": "Cloud Tasks queue",
+        "ref": lambda name, project: _pair_ref("cloudtasks_queues", name, "<location>/<queue>",
+                                               "asia-southeast1/my-queue"),
+        "args": lambda verb, ref, project: ["tasks", "queues", verb, ref[1], "--location", ref[0],
+                                            "--project", project],
+    },
 }
+
+
+def _pair_ref(kind, name, shape, example):
+    parts = name.split("/")
+    if len(parts) != 2 or not all(parts):
+        raise SystemExit(f"resource_roles {kind}: {name!r} must be '{shape}' (e.g. '{example}').")
+    return (parts[0], parts[1])
 
 
 def _run_ref(name):
@@ -531,6 +560,8 @@ _FOREIGN_ROLES = {
     "artifact_repositories": set(),
     "run_services": set(),
     "kms_keys": set(),
+    "run_jobs": set(),
+    "cloudtasks_queues": set(),
 }
 
 

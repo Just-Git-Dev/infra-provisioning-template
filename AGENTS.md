@@ -38,10 +38,15 @@ which pins a **full commit SHA**, not `@v1`.
   `<location>/<repo>`; `run_services` is `<region>/<service>` (exactly one `/`; gcloud args
   `run services <verb> <service> --region <region> --project <p>`, because `describe` refuses a
   full resource name; absent marker `Cannot find service`); `kms_keys` is
-  `<location>/<keyring>/<key>` (exactly two `/`; full-name ref, no `--project` in the read args). A malformed key
-  fails loud. Every kind needs a `_FOREIGN_ROLES` entry (empty set for these two). Neither is
+  `<location>/<keyring>/<key>` (exactly two `/`; full-name ref, no `--project` in the read args);
+  `run_jobs` is `<region>/<job>` (one `/`; args `run jobs <verb> <job> --region <region> --project <p>`;
+  absent marker `Cannot find job [`); `cloudtasks_queues` is `<location>/<queue>` (one `/`; args
+  `tasks queues <verb> <queue> --location <location> --project <p>`; absent is `NOT_FOUND`, already a
+  marker). A malformed key
+  fails loud. Every kind needs a `_FOREIGN_ROLES` entry (empty set for these four). None is
   allowed under `principals:` (ADR-008). Their grants need the project-scoped custom role
-  `jgdResourceIamAdmin` (listed in `bootstrap/provisioner-roles.txt`, twin of `jgdSecretIamAdmin`).
+  `jgdResourceIamAdmin` (listed in `bootstrap/provisioner-roles.txt`, twin of `jgdSecretIamAdmin`);
+  `cloudtasks_queues` needs `jgdQueueIamAdmin` instead (its permissions are TESTING-level, so it is a separate role).
 - **`prune_wif` owns `workloadIdentityUser`; the own-pool prefix is the ownership proof.** It
   removes a member only from a DECLARED SA, only if the member starts with THIS project's pool
   prefix (`principal[Set]://iam.googleapis.com/projects/<num>/locations/global/workloadIdentityPools/<pool>/`),

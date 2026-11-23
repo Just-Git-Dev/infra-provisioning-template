@@ -5,8 +5,9 @@ the alternatives were. Newest first.
 
 ## Index
 
-27 entries. Newest first.
+28 entries. Newest first.
 
+- [2026-11-20 — resource_roles gains run_jobs and cloudtasks_queues; jgdResourceIamAdmin grows to twelve permissions and jgdQueueIamAdmin is added](#2026-11-20--resource_roles-gains-run_jobs-and-cloudtasks_queues-jgdresourceiamadmin-grows-to-twelve-permissions-and-jgdqueueiamadmin-is-added)
 - [2026-11-16 — resource_roles gains run_services and kms_keys; jgdResourceIamAdmin custom role](#2026-11-16--resource_roles-gains-run_services-and-kms_keys-jgdresourceiamadmin-custom-role)
 - [2026-11-14 — Fleet provisioner loses service-account delete: jgdFleetSaAdmin replaces iam.serviceAccountAdmin](#2026-11-14--fleet-provisioner-loses-service-account-delete-jgdfleetsaadmin-replaces-iamserviceaccountadmin)
 - [2026-11-14 — prune_wif owns workloadIdentityUser; human_managed_roles are declared, never granted](#2026-11-14--prune_wif-owns-workloadidentityuser-human_managed_roles-are-declared-never-granted)
@@ -34,6 +35,20 @@ the alternatives were. Newest first.
 - [2026-08-21 — caller inputs move to `env:`; CI grows actionlint and lints `action.yml` itself](#2026-08-21--caller-inputs-move-to-env-ci-grows-actionlint-and-lints-actionyml-itself)
 - [2026-08-20 — SHA-pin this repo's own actions and enforce it in CI](#2026-08-20--sha-pin-this-repos-own-actions-and-enforce-it-in-ci)
 - [2026-08-20 — port the two mutation-path engine fixes from the consumer; release v1.0.1](#2026-08-20--port-the-two-mutation-path-engine-fixes-from-the-consumer-release-v101)
+
+## 2026-11-20 — resource_roles gains run_jobs and cloudtasks_queues; jgdResourceIamAdmin grows to twelve permissions and jgdQueueIamAdmin is added
+
+**Context.** A consumer needs one identity to execute a Cloud Run Job and another to enqueue to a Cloud Tasks queue. Both are per-resource grants, which today can only be made by hand, invisible to the plan and to zero-drift. Same motive as the 2026-11-16 entry; the owner chose to extend the engine rather than hand-grant.
+
+**Decision.** `run_jobs`, key `<region>/<job>` (exactly one `/`, both non-empty), gcloud args `run jobs <verb> <job> --region <region> --project <p>` (same region rule as `run services`). An absent job prints `Cannot find job [x].`, which is not in `_ABSENT_MARKERS`, so the bracketed marker `Cannot find job [` is added (bracketed so unrelated text cannot match). `cloudtasks_queues`, key `<location>/<queue>` (exactly one `/`, both non-empty), args `tasks queues <verb> <queue> --location <location> --project <p>`. An absent queue prints `NOT_FOUND: Queue does not exist` (probed read-only), already a marker. Both get an empty `_FOREIGN_ROLES` set and are refused under `principals:` (ADR-008). Both subcommands have get/add/remove-iam-policy-binding.
+
+**Custom role.** `jgdResourceIamAdmin` gains `run.jobs.{get,getIamPolicy,setIamPolicy}`: nine permissions become twelve. The three `cloudtasks.queues.{get,getIamPolicy,setIamPolicy}` permissions live in a new role, `jgdQueueIamAdmin` (see the ruling below). Both are pinned exactly in both anchor scripts and `tests/test_anchor.py`. The provisioner holds both roles, so `provisioner-roles.txt` gains a `jgdQueueIamAdmin` line.
+
+**Rollout order.** This change creates nothing live. A consumer must (1) bump its engine pin, (2) copy the new permissions into its anchor and re-run it (the role definition is updated in place), (3) grant its fleet reader `run.jobs.{get,getIamPolicy}` and `cloudtasks.queues.{get,getIamPolicy}` so dry-runs can read, (4) enable the Cloud Tasks API in the host project, and only then (5) declare rows. Declaring first fails PERMISSION_DENIED on the dry-run's `describe`. The resource must also already exist: the engine fails loud on an absent job or queue. Before the first `--prune`, declare every grant a config-owned SA already holds on a job or queue (for example a hand-made `run.invoker` on the job), or that grant is removed. The existence check is `describe`, not `get-iam-policy`: `gcloud run jobs get-iam-policy` on a missing job exits 0 with an empty policy.
+
+**Trade-off.** As with the other kinds, `setIamPolicy` on a job or queue lets the provisioner grant ANY role on it, and the `grantable-roles.txt` conditions do not reach resource-level grants. The provisioner already holds conditional project IAM admin, so this widens reach, not trust tier.
+
+**Ruling (owner, 2026-11-23): the queue permissions live in their own custom role, `jgdQueueIamAdmin`.** `cloudtasks.queues.getIamPolicy` and `cloudtasks.queues.setIamPolicy` are TESTING-level custom-role permissions (re-checked 2026-11-23 with `gcloud iam list-testable-permissions` on a consumer's project: support level TESTING, stage BETA; the other `cloudtasks.queues.*` permissions have no limit). `gcloud iam roles create|update` prompts for confirmation when a role carries them, and Google may change or withdraw them without notice. So `jgdQueueIamAdmin` holds exactly `cloudtasks.queues.{get,getIamPolicy,setIamPolicy}`, and `jgdResourceIamAdmin` keeps the other twelve (services, topics, keys, jobs). If Google withdraws one, only queue grants and the queue role's update are affected; the shared role every other per-resource grant depends on still updates. The owner rejected keeping them in the shared role (simpler, but one unsupported permission could block the shared role's updates) and dropping queue-level grants for a project-wide `cloudtasks.enqueuer` (contradicts the consumer's ruling to grant on the one queue only). Cost: a second role in both anchor scripts, `provisioner-roles.txt`, and the anchor tests.
 
 ## 2026-11-16 — resource_roles gains run_services and kms_keys; jgdResourceIamAdmin custom role
 
