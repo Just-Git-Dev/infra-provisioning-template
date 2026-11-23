@@ -31,7 +31,7 @@
 #
 # USAGE
 #   HOST_PROJECT=jgd-admin ./fleet-anchor.sh                 # host + reach ALL projects (grant mode)
-#   HOST_PROJECT=jgd-admin ./fleet-anchor.sh automahn        # host + reach one project by key
+#   HOST_PROJECT=jgd-admin ./fleet-anchor.sh my-proj         # host + reach one project by key
 #   HOST_PROJECT=jgd-admin REACH=folder FOLDER_ID=123456 ./fleet-anchor.sh   # host + folder-wide reach
 #   HOST_PROJECT=jgd-admin REACH=org    ORG_ID=987654    ./fleet-anchor.sh   # host + org-wide reach
 #   HOST_PROJECT=jgd-admin DRY_RUN=1 ./fleet-anchor.sh       # validate only: report gaps, change nothing

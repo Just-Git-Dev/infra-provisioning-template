@@ -104,9 +104,9 @@ def test_secret_audit_is_registered_as_handler_and_pruner():
 
 def test_exact_expected_policy_is_clean_and_counted():
     for h in (P.HANDLERS, P.PRUNERS):
-        rec, out, msg = run(h["secret_audit"], cfg("api", "issuer"),
+        rec, out, msg = run(h["secret_audit"], cfg("api", "worker"),
                             secret_reads({"api-env": good_policy("api"),
-                                          "issuer-env": good_policy("issuer")}))
+                                          "worker-env": good_policy("worker")}))
         assert msg is None, (msg, out)
         assert "examined 2 secret(s)" in out and "0 finding(s)" in out, out
         assert rec.calls == [], rec.calls
@@ -138,10 +138,10 @@ def test_a_conditioned_binding_is_a_finding():
 
 def test_runtime_sa_of_another_service_is_not_expected_on_this_secret():
     pol = good_policy("api")
-    pol[ACCESSOR].append(sa("issuer-run"))
-    rec, out, msg = run(P.PRUNERS["secret_audit"], cfg("api", "issuer"),
-                        secret_reads({"api-env": pol, "issuer-env": good_policy("issuer")}))
-    assert msg and "issuer-run" in out, (msg, out)
+    pol[ACCESSOR].append(sa("worker-run"))
+    rec, out, msg = run(P.PRUNERS["secret_audit"], cfg("api", "worker"),
+                        secret_reads({"api-env": pol, "worker-env": good_policy("worker")}))
+    assert msg and "worker-run" in out, (msg, out)
 
 
 def test_report_mode_warns_but_never_fails_and_never_mutates_in_both_modes():
@@ -167,17 +167,17 @@ def test_prune_variant_is_detect_only_in_both_modes():
 
 
 def test_absent_secret_is_info_and_not_examined():
-    # api has a secret, issuer has none yet: 1 examined, no finding
-    rec, out, msg = run(P.PRUNERS["secret_audit"], cfg("api", "issuer"),
+    # api has a secret, worker has none yet: 1 examined, no finding
+    rec, out, msg = run(P.PRUNERS["secret_audit"], cfg("api", "worker"),
                         secret_reads({"api-env": good_policy("api")}))
     assert msg is None, (msg, out)
-    assert "examined 1 secret(s)" in out and "issuer-env" in out, out
+    assert "examined 1 secret(s)" in out and "worker-env" in out, out
 
 
 def test_all_absent_is_info_in_both_modes_and_states_the_absent_count():
     # devops ruling 2026-10-20: absent <d>-env = info; prune must not go red for "not adopted yet"
     for h in (P.PRUNERS["secret_audit"], P.HANDLERS["secret_audit"]):
-        rec, out, msg = run(h, cfg("api", "issuer"), secret_reads({}))
+        rec, out, msg = run(h, cfg("api", "worker"), secret_reads({}))
         assert msg is None, (msg, out)
         assert "examined 0 secret(s) (2 absent: not adopted yet)" in out, out
 
@@ -185,7 +185,7 @@ def test_all_absent_is_info_in_both_modes_and_states_the_absent_count():
 def test_prune_still_fails_on_drift_when_other_secrets_are_absent():
     pol = good_policy("api")
     pol[ACCESSOR].append("user:stranger@example.com")
-    rec, out, msg = run(P.PRUNERS["secret_audit"], cfg("api", "issuer"), secret_reads({"api-env": pol}))
+    rec, out, msg = run(P.PRUNERS["secret_audit"], cfg("api", "worker"), secret_reads({"api-env": pol}))
     assert msg and "stranger" in msg, (msg, out)
     assert "examined 1 secret(s) (1 absent: not adopted yet)" in out, out
 

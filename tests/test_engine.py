@@ -71,38 +71,38 @@ def test_service_account_created_when_missing():
 
 def test_wif_binding_present_vs_missing():
     cfg = {
-        "project": {"github_org": "AutoMahn", "gcp_number": "42"},
+        "project": {"github_org": "ExampleOrg", "gcp_number": "42"},
         "wif": {"pool": "github-actions", "provider": "github"},
-        "service_accounts": [{"name": "rot", "wif_repos": ["AutoMahn/api", "AutoMahn/ui"]}],
+        "service_accounts": [{"name": "rot", "wif_repos": ["ExampleOrg/api", "ExampleOrg/ui"]}],
     }
 
     def gmap(args):
         j = " ".join(args)
         if "workload-identity-pools" in args and "describe" in args:
             return "exists"                        # pool + provider exist
-        if "AutoMahn/api" in j:
+        if "ExampleOrg/api" in j:
             return "roles/iam.workloadIdentityUser"  # api binding present
         return ""                                    # ui binding missing
 
     out = drive(P.ensure_wif, cfg, gmap)
     assert "✓ pool github-actions" in out
-    assert "✓   wif AutoMahn/api → rot" in out
-    assert "would   bind wif AutoMahn/ui → rot" in out
+    assert "✓   wif ExampleOrg/api → rot" in out
+    assert "would   bind wif ExampleOrg/ui → rot" in out
 
 
 def test_wif_pool_and_provider_created_when_missing():
     cfg = {
-        "project": {"github_org": "AutoMahn", "gcp_number": "42"},
+        "project": {"github_org": "ExampleOrg", "gcp_number": "42"},
         "wif": {"pool": "github-actions", "provider": "github"},
         "service_accounts": [],
     }
     out = drive(P.ensure_wif, cfg, lambda args: "")
     assert "would create pool github-actions" in out
-    assert "would create provider github (org-scoped: AutoMahn)" in out
+    assert "would create provider github (org-scoped: ExampleOrg)" in out
 
 
 def test_wif_skipped_when_no_pool():
-    cfg = {"project": {"github_org": "AutoMahn", "gcp_number": "42"}, "wif": {}, "service_accounts": []}
+    cfg = {"project": {"github_org": "ExampleOrg", "gcp_number": "42"}, "wif": {}, "service_accounts": []}
     out = drive(P.ensure_wif, cfg, lambda args: "")
     assert "no wif.pool configured" in out
 
@@ -357,7 +357,7 @@ def test_prune_resource_roles_removes_undeclared_owned_sa():
     ]}
     # live policy on app-secrets: rotator/admin (declared, keep), api-run/accessor (owned but
     # NOT declared → prune), a human and a foreign SA (unmanaged → never touched)
-    # exactly the shape real gcloud emits, verified against auto-mahn's app-secrets:
+    # exactly the shape real gcloud emits, verified against my-project's app-secrets:
     #   --flatten='bindings[].members' --format='csv[no-heading](bindings.role,bindings.members)'
     live = ("roles/secretmanager.admin,serviceAccount:rotator@p.iam.gserviceaccount.com\n"
             "roles/secretmanager.secretAccessor,serviceAccount:api-run@p.iam.gserviceaccount.com\n"
@@ -376,7 +376,7 @@ def test_prune_resource_roles_removes_deleted_principal():
     cfg = {"service_accounts": [{"name": "rotator",
                                  "resource_roles": {"secrets": {"app-secrets": []}}}]}
     live = ("roles/secretmanager.secretAccessor,deleted:serviceAccount:"
-            "old-name@p.iam.gserviceaccount.com?uid=117781001628895155170")
+            "old-name@p.iam.gserviceaccount.com?uid=100000000000000000001")
     out = drive(P.prune_resource_roles, cfg, lambda args: live)
     assert "would unbind roles/secretmanager.secretAccessor on secret app-secrets from old-name" in out
 
@@ -611,8 +611,8 @@ def test_capabilities_are_read_from_the_config_root_not_the_engine():
 def test_provisioner_kept_roles_substitutes_the_project():
     """`{project}` marks a project-scoped custom role — the provisioner needs one to set IAM
     on a secret, since projectIamAdmin confers setIamPolicy on the PROJECT, not on a resource."""
-    keep = P.provisioner_kept_roles("auto-mahn")
-    assert "projects/auto-mahn/roles/jgdSecretIamAdmin" in keep
+    keep = P.provisioner_kept_roles("my-project")
+    assert "projects/my-project/roles/jgdSecretIamAdmin" in keep
     assert not any("{project}" in r for r in keep)
     assert "roles/resourcemanager.projectIamAdmin" in keep
 
@@ -717,18 +717,18 @@ def test_resource_roles_artifact_repository_without_location_fails_loud():
 
 
 def test_prune_resource_roles_removes_a_deleted_principal_from_a_topic():
-    """Live on auto-mahn 2026-08-24: `automahn.outbox.poke` still carried pubsub.publisher for
-    `automahn-api-run`, the pre-rename SA. Project-scope-only pruning could never see it."""
+    """Live on my-project 2026-08-24: `app.outbox.poke` still carried pubsub.publisher for
+    `old-api-run`, the pre-rename SA. Project-scope-only pruning could never see it."""
     cfg = {"service_accounts": [
         {"name": "api-run",
-         "resource_roles": {"pubsub_topics": {"automahn.outbox.poke": ["pubsub.publisher"]}}},
+         "resource_roles": {"pubsub_topics": {"app.outbox.poke": ["pubsub.publisher"]}}},
     ]}
-    live = ("roles/pubsub.publisher,deleted:serviceAccount:automahn-api-run@p.iam."
-            "gserviceaccount.com?uid=117781001628895155170\n"
+    live = ("roles/pubsub.publisher,deleted:serviceAccount:old-api-run@p.iam."
+            "gserviceaccount.com?uid=100000000000000000001\n"
             "roles/pubsub.publisher,serviceAccount:api-run@p.iam.gserviceaccount.com")
     out = drive(P.prune_resource_roles, cfg, lambda args: live)
-    assert "would unbind roles/pubsub.publisher on topic automahn.outbox.poke" in out
-    assert "automahn-api-run (deleted)" in out
+    assert "would unbind roles/pubsub.publisher on topic app.outbox.poke" in out
+    assert "old-api-run (deleted)" in out
     assert out.count("unbind") == 1, "the live, declared api-run binding must be kept"
 
 
@@ -967,7 +967,7 @@ def test_provisioner_kept_roles_include_the_queue_iam_role():
 # nothing. These guard that it looks at the scope, and that it never mutates there.
 FLEET_CFG = {"provisioner": {
     "service_account": "infra-provisioner-fleet@jgd-admin.iam.gserviceaccount.com",
-    "scope": "organizations/250926570441"}}
+    "scope": "organizations/123456789012"}}
 
 
 def test_provisioner_identity_defaults_to_the_per_project_anchor():
@@ -979,7 +979,7 @@ def test_provisioner_identity_defaults_to_the_per_project_anchor():
 def test_provisioner_identity_reads_the_fleet_block():
     email, scope = P.provisioner_identity(FLEET_CFG, "p")
     assert email == "infra-provisioner-fleet@jgd-admin.iam.gserviceaccount.com", email
-    assert scope == "organizations/250926570441", scope
+    assert scope == "organizations/123456789012", scope
 
 
 def _fleet_gmap(scope_roles):
@@ -993,12 +993,12 @@ def _fleet_gmap(scope_roles):
 
 def test_scope_audit_reports_kept_roles_and_does_not_prune_them():
     out = drive(P.prune_provisioner, FLEET_CFG, _fleet_gmap([
-        "organizations/250926570441/roles/jgdFleetSaAdmin",
+        "organizations/123456789012/roles/jgdFleetSaAdmin",
         "roles/resourcemanager.projectIamAdmin",
         "roles/iam.workloadIdentityPoolAdmin",
-        "organizations/250926570441/roles/jgdScopeIamViewer"]))
-    assert "audit provisioner grants at organizations/250926570441" in out, out
-    assert "keep organizations/250926570441/roles/jgdFleetSaAdmin" in out, out
+        "organizations/123456789012/roles/jgdScopeIamViewer"]))
+    assert "audit provisioner grants at organizations/123456789012" in out, out
+    assert "keep organizations/123456789012/roles/jgdFleetSaAdmin" in out, out
     assert "UNDECLARED" not in out, out
     assert "keep roles/resourcemanager.projectIamAdmin" in out, out
     assert "jgdScopeIamViewer" in out, out
@@ -1011,7 +1011,7 @@ def test_scope_audit_flags_the_old_predefined_sa_admin_as_undeclared():
     delete service accounts): a leftover binding is drift the audit reports and fails on."""
     try:
         out = drive(P.prune_provisioner, FLEET_CFG, _fleet_gmap([
-            "organizations/250926570441/roles/jgdFleetSaAdmin",
+            "organizations/123456789012/roles/jgdFleetSaAdmin",
             "roles/iam.serviceAccountAdmin"]))
     except SystemExit as e:
         assert "undeclared role roles/iam.serviceAccountAdmin" in str(e), e
@@ -1022,7 +1022,7 @@ def test_scope_audit_flags_the_old_predefined_sa_admin_as_undeclared():
 def test_scope_audit_flags_an_undeclared_role_and_refuses_to_remove_it():
     try:
         out = drive(P.prune_provisioner, FLEET_CFG, _fleet_gmap([
-            "organizations/250926570441/roles/jgdFleetSaAdmin",
+            "organizations/123456789012/roles/jgdFleetSaAdmin",
             "roles/owner"]))
     except SystemExit as e:
         assert "undeclared" in str(e), e
@@ -1125,7 +1125,7 @@ def test_every_created_resource_carries_provenance():
     sa = _capture(P.ensure_service_accounts,
                   {"service_accounts": [{"name": "newsa", "roles": []}]}, lambda args: "")
     wif = _capture(P.ensure_wif,
-                   {"project": {"github_org": "AutoMahn", "gcp_number": "42"},
+                   {"project": {"github_org": "ExampleOrg", "gcp_number": "42"},
                     "wif": {"pool": "github-actions", "provider": "github"}},
                    lambda args: "")
     creates = [a for a in sa + wif if "create" in a or "create-oidc" in a]

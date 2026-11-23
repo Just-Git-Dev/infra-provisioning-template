@@ -5,8 +5,9 @@ the alternatives were. Newest first.
 
 ## Index
 
-28 entries. Newest first.
+29 entries. Newest first.
 
+- [2026-11-23 — This public repo names no consumer project, person or org id](#2026-11-23--this-public-repo-names-no-consumer-project-person-or-org-id)
 - [2026-11-20 — resource_roles gains run_jobs and cloudtasks_queues; jgdResourceIamAdmin grows to twelve permissions and jgdQueueIamAdmin is added](#2026-11-20--resource_roles-gains-run_jobs-and-cloudtasks_queues-jgdresourceiamadmin-grows-to-twelve-permissions-and-jgdqueueiamadmin-is-added)
 - [2026-11-16 — resource_roles gains run_services and kms_keys; jgdResourceIamAdmin custom role](#2026-11-16--resource_roles-gains-run_services-and-kms_keys-jgdresourceiamadmin-custom-role)
 - [2026-11-14 — Fleet provisioner loses service-account delete: jgdFleetSaAdmin replaces iam.serviceAccountAdmin](#2026-11-14--fleet-provisioner-loses-service-account-delete-jgdfleetsaadmin-replaces-iamserviceaccountadmin)
@@ -35,6 +36,16 @@ the alternatives were. Newest first.
 - [2026-08-21 — caller inputs move to `env:`; CI grows actionlint and lints `action.yml` itself](#2026-08-21--caller-inputs-move-to-env-ci-grows-actionlint-and-lints-actionyml-itself)
 - [2026-08-20 — SHA-pin this repo's own actions and enforce it in CI](#2026-08-20--sha-pin-this-repos-own-actions-and-enforce-it-in-ci)
 - [2026-08-20 — port the two mutation-path engine fixes from the consumer; release v1.0.1](#2026-08-20--port-the-two-mutation-path-engine-fixes-from-the-consumer-release-v101)
+
+## 2026-11-23 — This public repo names no consumer project, person or org id
+
+**Context.** This repo is public, and the engine is generic: everything project-specific reaches it through a consumer's own `config.yaml` in that consumer's private repo. Yet tests, fixtures, bootstrap usage comments and this log still carried real consumer project names, GitHub orgs, domains, service names, a real GCP organization number, a real service-account uid, and the account email from recorded `gcloud` output. They came in with the engine when it moved out of a private repo, and later entries kept using live projects as examples.
+
+**Decision (owner, 2026-11-23): no mention at all.** Not pseudonyms ("consumer A") either: neutral placeholders only. GitHub org `ExampleOrg`, project `my-project` / `my-proj`, domain `example.com`, org id `123456789012`, account `owner@example.com`, service names `api` / `worker`, and prose says "a consumer project". Recorded fixtures keep the real `gcloud` output shape with the identifiers swapped. The one exception is `CODEOWNERS`, where GitHub needs a real handle.
+
+**Scope.** Current files only (59 matching lines across 12 files on `main` before, 0 after; the 2 identical grep runs are the evidence). Git history, tags and closed PRs still hold the old text. Rewriting them is a separate owner decision, because consumers pin this engine by commit SHA and a rewrite would break every pin.
+
+**Rejected.** Pseudonyms as in the reusable-workflows repo ("consumer A-D"): the owner asked for no mention at all, and a stable pseudonym still tells a reader how many consumers exist and which entries concern the same one.
 
 ## 2026-11-20 — resource_roles gains run_jobs and cloudtasks_queues; jgdResourceIamAdmin grows to twelve permissions and jgdQueueIamAdmin is added
 
@@ -98,7 +109,7 @@ the alternatives were. Newest first.
 
 ## 2026-10-21 — Dry-run verifies a custom role exists before planning its binding
 
-**Symptom.** The realm-id dry-run printed `~ would bind organizations/250926570441/roles/repoAdmin → repo-admin`, but that custom role did not exist; the apply then failed `INVALID_ARGUMENT: Role (...) does not exist in the resource's hierarchy`.
+**Symptom.** A consumer project's dry-run printed `~ would bind organizations/<org-id>/roles/repoAdmin → repo-admin`, but that custom role did not exist; the apply then failed `INVALID_ARGUMENT: Role (...) does not exist in the resource's hierarchy`.
 
 **Root cause.** `ensure_service_accounts` / `ensure_resource_roles` asked only "does the SA already hold this role?" (`sa_has_role`). For a custom role that is false whether the role is missing or the binding is, so dry-run planned a bind the apply could not make. Dry-run guessed that the role exists.
 
@@ -150,7 +161,7 @@ and every other ensure path write nothing for it; prune never touches it (Google
 `owned`). An undeclared agent, or a declared agent holding any other role, is still flagged.
 
 **Why.** Owner ruling 21 (one writer per SA policy, no same-org allowance) left a real, Google-
-required grant with no config route: on auto-mahn the Pub/Sub agent
+required grant with no config route: on one consumer project the Pub/Sub agent
 `service-<number>@gcp-sa-pubsub.iam.gserviceaccount.com` must hold
 `roles/iam.serviceAccountTokenCreator` on `api-run` for push OIDC auth
 (https://cloud.google.com/pubsub/docs/authenticate-push-subscriptions). SA-level
@@ -171,7 +182,7 @@ Unknown name, non-list/empty value, or a non-`-run` SA fails at plan time.
 **Phase 2 (designed, not built).** JGD ENSURES the binding (`add-iam-policy-binding`, idempotent
 via the existing has-member check) with retry/backoff, because a Google agent is created lazily
 (first Pub/Sub use) and may not exist when the SA policy is written; then the project drops its
-own script lines (AutoMahn `infra/gcp/bootstrap-pubsub-eventworker.sh`, `bootstrap-gcp.sh`).
+own bootstrap script lines for that grant.
 Until then the project script stays the writer and this key only keeps the audit honest.
 
 **For infra-provisioning (not edited here).** Its CLAUDE.md line "Declare only SAs we own. Omit
@@ -527,8 +538,8 @@ the plan, unprunable, and **not covered by "zero drift"**. Leaving the other kin
 the honest answer to "is this project's access fully described?" stayed *no* for any project
 using pub/sub or GAR — which is all of them.
 
-A live read of `auto-mahn` while scoping this proved the gap is not theoretical: topic
-`automahn.outbox.poke` still carries `roles/pubsub.publisher` for `automahn-api-run`, the
+A live read of a consumer project while scoping this proved the gap is not theoretical: a topic
+still carries `roles/pubsub.publisher` for a deleted `*-api-run` service account, the
 **pre-rename** SA (`deleted:` principal, residue of the 2026-08-20 `<component>-<role>`
 rename). Four months of clean project-scope plans could never see it, because it is not a
 project-scope binding.
@@ -562,7 +573,7 @@ split that into a `('', '')` pair. It was harmless in both callers by luck — `
 against a member and `prune` skips anything not `serviceAccount:` — so this is hardening, not
 a bug fix. Filtering it at the seam means the next kind cannot inherit the trap.
 
-**Not done:** no config declares the new kinds yet. Adopting them on `automahn`/`traide-co` —
+**Not done:** no config declares the new kinds yet. Adopting them in consumer configs —
 and deciding whether that stale `deleted:` topic binding gets pruned — is a separate,
 apply-bearing change.
 
@@ -703,7 +714,7 @@ deterministic rather than guessed (the SC2020 lesson of 2026-07-24).
 
 Found in the first dry-run of `resource_roles` against a live project, before any apply.
 
-**Symptom.** `provision.py automahn --prune` planned four unbinds where two were expected:
+**Symptom.** `provision.py <project> --prune` planned four unbinds where two were expected:
 
 ```
 ~ would unbind roles/iam.serviceAccountUser on service account api-run from github-releaser

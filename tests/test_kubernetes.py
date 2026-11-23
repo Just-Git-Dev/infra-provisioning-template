@@ -131,18 +131,18 @@ def test_rbac_skipped_when_none():
 
 # ── ksa (both WI halves) ─────────────────────────────────────────────────────
 def test_ksa_created_and_annotated_and_gcp_bound():
-    cfg = {"gcp_project": "auto-mahn", "service_accounts": [
-        {"name": "api", "gcp_service_account": "api-run@auto-mahn.iam.gserviceaccount.com"}]}
+    cfg = {"gcp_project": "my-project", "service_accounts": [
+        {"name": "api", "gcp_service_account": "api-run@my-project.iam.gserviceaccount.com"}]}
     # kout: everything absent (KSA missing, no annotation). gcp: no WI member yet.
     out = drive(P.ensure_ksa, cfg, lambda args: "", gcp_map=lambda args: "")
     assert "would create ksa api" in out
-    assert "would   annotate api wi → api-run@auto-mahn.iam.gserviceaccount.com" in out
+    assert "would   annotate api wi → api-run@my-project.iam.gserviceaccount.com" in out
     assert "would   bind gcp wi api → api-run" in out
 
 
 def test_ksa_annotation_and_binding_present():
-    gsa = "api-run@auto-mahn.iam.gserviceaccount.com"
-    cfg = {"gcp_project": "auto-mahn",
+    gsa = "api-run@my-project.iam.gserviceaccount.com"
+    cfg = {"gcp_project": "my-project",
            "service_accounts": [{"name": "api", "gcp_service_account": gsa}]}
 
     def kmap(args):
@@ -177,10 +177,10 @@ def test_service_skipped_when_none():
 
 
 def test_ingress_created_with_tls_and_dns():
-    cfg = {"ingress": {"name": "api", "host": "api.automahn.app", "service": "api",
-                       "tls_secret": "api-tls", "external_dns": "api.automahn.app"}}
+    cfg = {"ingress": {"name": "api", "host": "api.example.com", "service": "api",
+                       "tls_secret": "api-tls", "external_dns": "api.example.com"}}
     out = drive(P.ensure_ingress, cfg, lambda args: "")
-    assert "would create ingress api → api.automahn.app" in out
+    assert "would create ingress api → api.example.com" in out
 
 
 def test_ingress_skipped_when_none():
@@ -189,9 +189,9 @@ def test_ingress_skipped_when_none():
 
 def test_certificate_created_when_missing():
     cfg = {"certificate": {"name": "api-tls", "issuer": "letsencrypt-prod",
-                           "dns_names": ["api.automahn.app"]}}
+                           "dns_names": ["api.example.com"]}}
     out = drive(P.ensure_certificate, cfg, lambda args: "")
-    assert "would create certificate api-tls (api.automahn.app)" in out
+    assert "would create certificate api-tls (api.example.com)" in out
 
 
 def test_hpa_created_when_missing():
@@ -273,16 +273,16 @@ def test_prune_ksa_noop_when_matching():
 
 # ── multi-target dispatch (provision.targets_of) ─────────────────────────────
 def test_targets_autowrap_bare_config_is_gcp():
-    cfg = {"project": {"gcp_id": "auto-mahn"}, "service_accounts": []}
+    cfg = {"project": {"gcp_id": "my-project"}, "service_accounts": []}
     targets = provision.targets_of(cfg)
     assert len(targets) == 1
     assert targets[0]["kind"] == "gcp"
-    assert targets[0]["project"]["gcp_id"] == "auto-mahn"   # whole config is the target
+    assert targets[0]["project"]["gcp_id"] == "my-project"   # whole config is the target
 
 
 def test_targets_explicit_are_used_as_is():
     cfg = {"targets": [
-        {"kind": "gcp", "project": {"gcp_id": "auto-mahn"}},
+        {"kind": "gcp", "project": {"gcp_id": "my-project"}},
         {"kind": "kubernetes", "namespace": "app", "cluster": "prod"},
     ]}
     targets = provision.targets_of(cfg)
