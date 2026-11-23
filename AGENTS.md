@@ -45,7 +45,8 @@ which pins a **full commit SHA**, not `@v1`.
   marker). A malformed key
   fails loud. Every kind needs a `_FOREIGN_ROLES` entry (empty set for these four). None is
   allowed under `principals:` (ADR-008). Their grants need the project-scoped custom role
-  `jgdResourceIamAdmin` (listed in `bootstrap/provisioner-roles.txt`, twin of `jgdSecretIamAdmin`).
+  `jgdResourceIamAdmin` (listed in `bootstrap/provisioner-roles.txt`, twin of `jgdSecretIamAdmin`);
+  `cloudtasks_queues` needs `jgdQueueIamAdmin` instead (its permissions are TESTING-level, so it is a separate role).
 - **`prune_wif` owns `workloadIdentityUser`; the own-pool prefix is the ownership proof.** It
   removes a member only from a DECLARED SA, only if the member starts with THIS project's pool
   prefix (`principal[Set]://iam.googleapis.com/projects/<num>/locations/global/workloadIdentityPools/<pool>/`),

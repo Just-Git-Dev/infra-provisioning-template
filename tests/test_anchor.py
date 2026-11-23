@@ -65,6 +65,7 @@ def test_dry_run_announces_every_would_change():
         would = [ln for ln in out.splitlines() if "would:" in ln]
         assert would, f"{script} planned nothing at all — the stub should make everything absent"
         for needle in ("roles create jgdSecretIamAdmin", "roles create jgdResourceIamAdmin",
+                       "roles create jgdQueueIamAdmin",
                        "add-iam-policy-binding"):
             assert any(needle in ln for ln in would), \
                 f"{script}: no `~ would:` line for '{needle}' (swallowed by a redirect?)"
@@ -117,6 +118,10 @@ def test_scope_reach_still_binds_project_scoped_custom_role():
         assert needle in out, (
             "REACH=%s: no per-project jgdResourceIamAdmin binding planned (resource_roles "
             "run_services/pubsub_topics/kms_keys would fail PERMISSION_DENIED).\n%s" % (mode, out))
+        needle = "projects/%s/roles/jgdQueueIamAdmin" % TARGET
+        assert needle in out, (
+            "REACH=%s: no per-project jgdQueueIamAdmin binding planned (resource_roles "
+            "cloudtasks_queues would fail PERMISSION_DENIED).\n%s" % (mode, out))
 
 
 def test_scope_reach_does_not_grant_custom_role_at_scope():
@@ -236,9 +241,11 @@ def test_jgdFleetSaAdmin_permissions_exact():
 RESOURCE_IAM_ADMIN_PERMS = {
     "%s.%s" % (res, verb)
     for res in ("run.services", "pubsub.topics", "cloudkms.cryptoKeys",
-                "run.jobs", "cloudtasks.queues")
+                "run.jobs")
     for verb in ("get", "getIamPolicy", "setIamPolicy")
 }
+# Split out of jgdResourceIamAdmin: two of these are TESTING-level (gcloud prompts on create/update).
+QUEUE_IAM_ADMIN_PERMS = {"cloudtasks.queues.%s" % v for v in ("get", "getIamPolicy", "setIamPolicy")}
 
 
 def _custom_role_perms(script, role):
@@ -250,11 +257,18 @@ def _custom_role_perms(script, role):
 
 def test_jgdResourceIamAdmin_permissions_exact_in_both_anchors():
     # A typo in a permission name passes every dry-run and only fails on the live
-    # `roles create`, so pin the exact fifteen in both reference scripts.
-    assert len(RESOURCE_IAM_ADMIN_PERMS) == 15
+    # `roles create`, so pin the exact twelve in both reference scripts.
+    assert len(RESOURCE_IAM_ADMIN_PERMS) == 12
     for script in ("anchor.sh", "fleet-anchor.sh"):
         perms = _custom_role_perms(script, "jgdResourceIamAdmin")
         assert perms == RESOURCE_IAM_ADMIN_PERMS, (script, sorted(perms ^ RESOURCE_IAM_ADMIN_PERMS))
+
+
+def test_jgdQueueIamAdmin_permissions_exact_in_both_anchors():
+    assert len(QUEUE_IAM_ADMIN_PERMS) == 3
+    for script in ("anchor.sh", "fleet-anchor.sh"):
+        perms = _custom_role_perms(script, "jgdQueueIamAdmin")
+        assert perms == QUEUE_IAM_ADMIN_PERMS, (script, sorted(perms ^ QUEUE_IAM_ADMIN_PERMS))
 
 
 def test_provisioner_role_set_holds_no_sa_delete_undelete_or_disable():

@@ -241,6 +241,7 @@ def test_provisioner_kept_roles_reads_shared_file():
         "roles/iam.workloadIdentityPoolAdmin",
         "projects/p/roles/jgdSecretIamAdmin",
         "projects/p/roles/jgdResourceIamAdmin",
+        "projects/p/roles/jgdQueueIamAdmin",
     }
 
 
@@ -947,6 +948,10 @@ def test_principals_refuse_run_jobs_and_cloudtasks_queues():
 
 def test_provisioner_kept_roles_include_the_resource_iam_role():
     assert "projects/p/roles/jgdResourceIamAdmin" in P.provisioner_kept_roles("p")
+
+
+def test_provisioner_kept_roles_include_the_queue_iam_role():
+    assert "projects/p/roles/jgdQueueIamAdmin" in P.provisioner_kept_roles("p")
 
 
 # This block MUST stay at the very END of the file: it snapshots globals() at the moment it

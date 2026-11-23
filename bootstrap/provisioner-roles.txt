@@ -37,9 +37,15 @@ roles/iam.workloadIdentityPoolAdmin
 # who may access them.
 projects/{project}/roles/jgdSecretIamAdmin
 
-# jgdResourceIamAdmin: manage WHO may access a Cloud Run service or job, Pub/Sub topic, KMS key
-# or Cloud Tasks queue (resource_roles run_services / run_jobs / pubsub_topics / kms_keys /
-# cloudtasks_queues): get + getIamPolicy +
+# jgdResourceIamAdmin: manage WHO may access a Cloud Run service or job, Pub/Sub topic or KMS key
+# (resource_roles run_services / run_jobs / pubsub_topics / kms_keys): get + getIamPolicy +
 # setIamPolicy per kind and nothing else. It cannot create, delete, deploy, invoke, publish
 # or use a key. Created/reconciled by the anchor scripts.
 projects/{project}/roles/jgdResourceIamAdmin
+
+# jgdQueueIamAdmin: manage WHO may access a Cloud Tasks queue (resource_roles cloudtasks_queues):
+# queues.get + getIamPolicy + setIamPolicy and nothing else. It cannot create, delete, pause,
+# purge a queue or enqueue. A separate role from jgdResourceIamAdmin because two of its
+# permissions are TESTING-level (gcloud prompts on create/update, and Google may withdraw them),
+# so a problem there cannot block the shared role. Created/reconciled by the anchor scripts.
+projects/{project}/roles/jgdQueueIamAdmin

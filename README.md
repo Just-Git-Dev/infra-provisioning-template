@@ -163,7 +163,7 @@ An absent Cloud Run service (`Cannot find service`), job (`Cannot find job`), ke
 other absent resource. None of these kinds is allowed under `principals:` (that stays limited to
 `service_accounts`, ADR-008), and pruning follows the other kinds: only declared SAs and
 `deleted:` members are removed, so e.g. `allUsers` with `roles/run.invoker` is never touched.
-All four need the `jgdResourceIamAdmin` custom role (see Safety notes).
+The first three need the `jgdResourceIamAdmin` custom role and `cloudtasks_queues` needs `jgdQueueIamAdmin` (see Safety notes).
 The engine **binds** on these resources and
 never creates them — a resource that does not exist fails loud rather than being skipped,
 because a silent skip would make a clean plan a lie. `--prune` removes undeclared bindings
@@ -364,10 +364,13 @@ Edit the `PROVISIONER_REPO` / `PROJECTS` placeholders (or set `PROVISIONER_REPO`
   the identity broker read every secret **payload** in the fleet. The custom role can neither
   create, delete, nor read a secret — only manage who may access one. The anchor scripts create
   and reconcile it.
-  `jgdResourceIamAdmin` is its twin for the other resource kinds that need it: fifteen permissions,
-  `get`/`getIamPolicy`/`setIamPolicy` on each of `run.services`, `run.jobs`, `pubsub.topics`,
-  `cloudkms.cryptoKeys` and `cloudtasks.queues` (what `resource_roles.run_services`, `.run_jobs`,
-  `.pubsub_topics`, `.kms_keys` and `.cloudtasks_queues` need). Project-scoped, so the org scope audit is unaffected. Trade-off: `setIamPolicy` on a
+  `jgdResourceIamAdmin` is its twin for the other resource kinds that need it: twelve permissions,
+  `get`/`getIamPolicy`/`setIamPolicy` on each of `run.services`, `run.jobs`, `pubsub.topics` and
+  `cloudkms.cryptoKeys` (what `resource_roles.run_services`, `.run_jobs`, `.pubsub_topics` and
+  `.kms_keys` need). `jgdQueueIamAdmin` holds exactly `cloudtasks.queues.{get,getIamPolicy,setIamPolicy}`
+  for `resource_roles.cloudtasks_queues`. It is separate because two of those permissions are
+  TESTING-level: `gcloud iam roles create|update` prompts for confirmation, and if Google withdraws
+  one only the queue role is affected, not the shared role. Project-scoped, so the org scope audit is unaffected. Trade-off: `setIamPolicy` on a
   resource lets the provisioner grant ANY role on it, and the `grantable-roles.txt` condition
   does not reach resource-level grants (same as secrets).
 - **`principals` is guarded by a FILE, not by IAM.** `modifiedGrantsByRole` — the IAM Condition
