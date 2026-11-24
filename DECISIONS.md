@@ -5,8 +5,9 @@ the alternatives were. Newest first.
 
 ## Index
 
-29 entries. Newest first.
+30 entries. Newest first.
 
+- [2026-11-23 — A laptop pre-push check refuses consumer names](#2026-11-23--a-laptop-pre-push-check-refuses-consumer-names)
 - [2026-11-23 — This public repo names no consumer project, person or org id](#2026-11-23--this-public-repo-names-no-consumer-project-person-or-org-id)
 - [2026-11-20 — resource_roles gains run_jobs and cloudtasks_queues; jgdResourceIamAdmin grows to twelve permissions and jgdQueueIamAdmin is added](#2026-11-20--resource_roles-gains-run_jobs-and-cloudtasks_queues-jgdresourceiamadmin-grows-to-twelve-permissions-and-jgdqueueiamadmin-is-added)
 - [2026-11-16 — resource_roles gains run_services and kms_keys; jgdResourceIamAdmin custom role](#2026-11-16--resource_roles-gains-run_services-and-kms_keys-jgdresourceiamadmin-custom-role)
@@ -36,6 +37,22 @@ the alternatives were. Newest first.
 - [2026-08-21 — caller inputs move to `env:`; CI grows actionlint and lints `action.yml` itself](#2026-08-21--caller-inputs-move-to-env-ci-grows-actionlint-and-lints-actionyml-itself)
 - [2026-08-20 — SHA-pin this repo's own actions and enforce it in CI](#2026-08-20--sha-pin-this-repos-own-actions-and-enforce-it-in-ci)
 - [2026-08-20 — port the two mutation-path engine fixes from the consumer; release v1.0.1](#2026-08-20--port-the-two-mutation-path-engine-fixes-from-the-consumer-release-v101)
+
+## 2026-11-23 — A laptop pre-push check refuses consumer names
+
+**Context.** The 2026-11-23 rule below (no consumer project, person or org id in this public repo) was enforced by a manual grep before each push. That habit is how 59 such lines got in. Something must refuse the push instead.
+
+**Decision.** A laptop-only `names` check, run by `make ci` (so the pre-push hook runs it) after the CI-mirrored `CHECKS`, listed in a separate `LOCAL_CHECKS`. `scripts/check_names.py` is vendored from the fleet skill `public-name-guard`. It scans tracked file paths and text (CODEOWNERS exempt) and the messages of the commits being pushed (`origin/main..HEAD`). It prints `file:line: pattern #k`, never the matched text.
+
+**Why the list is not in this repo.** The list of forbidden names is itself a mention. It lives in a laptop file outside every repo.
+
+**Why no list fails (owner, 2026-11-23).** A guard that skips when unconfigured passes silently on the one machine that forgot it.
+
+**Why laptop-only, not CI (owner, 2026-11-24).** A CI job was built and dropped before merge: "let's just keep it as laptop hook, we'll not overcomplicate it for now". CI would have needed the list as a repo secret (a variable prints unmasked in public logs), re-set on every list change, and would fail every fork PR. Accepted gaps: PR titles and descriptions, files edited on github.com, pushes from another machine or with `--no-verify`. `names` sits outside `CHECKS`, so `tests/test_ci_make_targets.py` (which makes `CHECKS` equal ci.yml) stays exact.
+
+**Why older history is not scanned.** It still holds names, and the owner ruled out a rewrite (consumers pin this engine by SHA).
+
+**Not covered.** The list is shared with `reusable-workflows`, which allows the pseudonyms "consumer A-D"; this repo bans them, and that stricter half is still by review.
 
 ## 2026-11-23 — This public repo names no consumer project, person or org id
 

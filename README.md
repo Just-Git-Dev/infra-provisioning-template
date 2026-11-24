@@ -331,7 +331,16 @@ the same make targets, so the two cannot drift (`tests/test_ci_make_targets.py` 
 - What it runs: `venv` (`.venv` built from `requirements-ci.txt`, the same file CI installs),
   `tests` (engine, kubernetes, bootstrap anchors, and the gate's own tests), `tools` (local
   shellcheck/actionlint must equal CI's pinned versions, else it prints the install hint),
-  `actionlint`, `canary`, `shellcheck`, `composite` (the composite action's `run:` bodies), `pinned`.
+  `actionlint`, `canary`, `shellcheck`, `composite` (the composite action's `run:` bodies), `pinned`,
+  then the laptop-only `names` (below).
+- `make names` (laptop only, not in CI): this repo is public and names no consumer project, person
+  or org id. The check reads a list of forbidden patterns that is NOT in the repo (the list would
+  itself be a mention): `$NAME_DENYLIST_FILE`, else `~/.config/jgd/public-denylist.txt`. It scans
+  tracked files and the messages of the commits being pushed (`NAMES_RANGE`, default
+  `origin/main..HEAD`). It prints only `file:line: pattern #k`, never the matched text, and FAILS
+  when no list is found. Not covered: PR titles and descriptions, web edits, and pushes from
+  another machine or with `--no-verify`.
+  `scripts/check_names.py` is vendored: change the canonical copy and re-vendor, never edit it here.
 - The hook checks the commit being pushed, not just the tree: it refuses a dirty tree, or a pushed
   ref whose sha is not `HEAD`, and says what to do. It scrubs git's env before running checks.
 - Over ssh GitHub can drop the idle connection while the hook runs (rc 141/128); then push over
