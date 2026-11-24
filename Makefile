@@ -7,28 +7,31 @@ SHELL := bash
 SHELLCHECK_VERSION := 0.11.0
 ACTIONLINT_VERSION := 1.7.12
 
-# Commits whose messages `make names` scans; CI sets it (empty = none). The pre-push hook pins the
-# tree to the pushed commit, so origin/main..HEAD is exactly what is being pushed.
+# Commits whose messages `make names` scans. The pre-push hook pins the tree to the pushed commit,
+# so origin/main..HEAD is exactly what is being pushed.
 NAMES_RANGE ?= origin/main..HEAD
 
 # Order = CI's order. Add a check by adding a target and listing it here AND in ci.yml.
-CHECKS := venv tests tools actionlint canary shellcheck composite pinned names
+CHECKS := venv tests tools actionlint canary shellcheck composite pinned
+# Laptop-only, run by `make ci` after CHECKS: they need something CI does not have (the name list).
+LOCAL_CHECKS := names
+ALL_CHECKS := $(CHECKS) $(LOCAL_CHECKS)
 
 # CI runs python3.12; prefer it, then 3.13 (the laptop's python3 may be newer with no pytest).
 PYBIN := $(shell command -v python3.12 || command -v python3.13 || command -v python3)
 VENV := .venv
 PY := $(VENV)/bin/python
 
-.PHONY: ci hooks $(CHECKS)
+.PHONY: ci hooks $(ALL_CHECKS)
 
 ci:
 	@if [ "$$(git config core.hooksPath 2>/dev/null)" != ".githooks" ]; then \
 	  echo "ci: warning: pre-push hook not installed; run 'make hooks'"; fi
-	@n=0; for t in $(CHECKS); do \
+	@n=0; for t in $(ALL_CHECKS); do \
 	  echo "== ci: $$t"; \
-	  $(MAKE) --no-print-directory $$t || { echo "ci: FAILED at target '$$t' ($$n of $(words $(CHECKS)) checks passed before it)"; exit 1; }; \
+	  $(MAKE) --no-print-directory $$t || { echo "ci: FAILED at target '$$t' ($$n of $(words $(ALL_CHECKS)) checks passed before it)"; exit 1; }; \
 	  n=$$((n+1)); \
-	done; echo "ci: OK, $$n of $(words $(CHECKS)) checks ran and passed"
+	done; echo "ci: OK, $$n of $(words $(ALL_CHECKS)) checks ran and passed ($(words $(LOCAL_CHECKS)) laptop-only: $(LOCAL_CHECKS))"
 
 hooks:
 	git config core.hooksPath .githooks
@@ -95,8 +98,8 @@ composite: tools venv
 pinned: venv
 	$(PY) scripts/check_pinned_actions.py .github/workflows action.yml
 
-# This repo is public: no consumer project, person or org id (DECISIONS 2026-11-23). The list is NOT
-# in the repo: secret NAME_DENYLIST in CI, else $$NAME_DENYLIST_FILE, else
+# This repo is public: no consumer project, person or org id (DECISIONS 2026-11-23). Laptop-only
+# (LOCAL_CHECKS): the list is NOT in the repo, it is $$NAME_DENYLIST_FILE or
 # ~/.config/jgd/public-denylist.txt; no list = FAIL. Prints file:line + pattern number, never the
 # text. Vendored from the fleet skill public-name-guard: never edit scripts/check_names.py here.
 # Self-test first (stdlib only, no venv), then the check.
