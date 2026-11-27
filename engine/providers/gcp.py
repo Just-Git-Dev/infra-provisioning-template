@@ -9,7 +9,9 @@ Manages exactly four access subsystems (idempotent, plan-first):
                        project-wide — the least-privilege alternative to a project role
   - principals       : a HUMAN/GROUP member granted a role ON one of our SAs (the mirror of
                        resource_roles: who may assume this SA, rather than what it may reach)
-  - wif              : the app-repo WIF pool/provider + per-SA impersonation bindings
+  - foreign_members  : a PROJECT role for ANOTHER project's service account (e.g. a staging
+                       project's Cloud Run agent reading this project's registry)
+  - wif             : the app-repo WIF pool/provider + per-SA impersonation bindings
 
 Everything else a project needs (enabling APIs, creating secrets, pub/sub topics,
 Cloud Monitoring alert policies) is a **resource** owned by the app repo itself,
@@ -947,6 +949,195 @@ def prune_principals(cfg, project):
         c("ok", "no extra principals bindings")
 
 
+# ── foreign_members: a PROJECT role for ANOTHER project's service account ──────
+# Every other member this provider builds is `serviceAccount:<name>@<this project>`. This block
+# is the one place a config grants a project role to an identity it does not own — e.g. a
+# staging project's Cloud Run service agent reading this project's registry:
+#
+#   foreign_members:                               # TOP-LEVEL
+#     - member: serviceAccount:service-<number>@serverless-robot-prod.iam.gserviceaccount.com
+#       roles: [artifactregistry.reader]
+#       reason: "staging runs this project's image digests"
+#
+# Narrow by construction, all checked at PLAN time:
+#   - a well-formed `serviceAccount:<id>@<domain>` member (humans go through `principals:`);
+#   - never an identity of THIS project: its own SAs, its default compute / App Engine SAs, its
+#     Google service agents (`service-<number>@`), nor the provisioner (prune_provisioner would
+#     strip what ensure granted, on every run);
+#   - roles from the ENGINE's bootstrap/foreign-grantable-roles.txt (deliberately narrower than
+#     the project list, which carries admin roles) AND from the config root's grantable-roles.txt
+#     (what the provisioner may grant at all; under the fleet anchor its IAM condition enforces
+#     it, so checking here turns an apply-time 403 into a plan-time error); no capabilities;
+#   - a `reason`: the grant is invisible from the member's own project.
+# Writes are unconditional, one role per call (the hasOnly() rule, see _expand_roles).
+#
+# REVOKING: deleting an entry would orphan its grant (prune only touches declared members). So a
+# grant is withdrawn with a tombstone, `{member, reason, revoke: true}` and no roles, the way an
+# SA is retired: ensure binds nothing for it and `--prune foreign_members` removes every
+# unconditional role it still holds. Drop the entry once the prune has run.
+_FOREIGN_KEYS = {"member", "roles", "reason", "revoke"}
+_FOREIGN_MEMBER_RE = re.compile(r"^serviceAccount:[a-z0-9][a-z0-9._-]*@[a-z0-9][a-z0-9.-]*\.[a-z]+$")
+
+
+def foreign_grantable_roles():
+    """Roles a foreign member may hold — the ENGINE's file (core.ROOT), like
+    principal_grantable_roles(): widening it is a reviewed engine change."""
+    path = os.path.join(core.ROOT, "bootstrap", "foreign-grantable-roles.txt")
+    roles = set()
+    with open(path) as fh:
+        for line in fh:
+            line = line.split("#", 1)[0].strip()
+            if line:
+                roles.add(_qualify(line))
+    return roles
+
+
+def _own_identity(member, cfg, project):
+    """Why `member` belongs to THIS project (a reason string), or None."""
+    email = member.split(":", 1)[1]
+    if email.endswith(f"@{project}.iam.gserviceaccount.com"):
+        return "one of this project's own service accounts — declare it under `service_accounts:`"
+    if email == f"{project}@appspot.gserviceaccount.com":
+        return "this project's App Engine default service account"
+    if email == provisioner_identity(cfg, project)[0]:
+        return ("the provisioner itself — prune_provisioner would remove what this grants, on "
+                "every run")
+    num = _project_number(project)
+    if email == f"{num}-compute@developer.gserviceaccount.com":
+        return "this project's default compute service account"
+    if email.startswith(f"service-{num}@") or email.startswith(f"{num}@"):
+        return "one of this project's own Google service agents"
+    return None
+
+
+def _declared_foreign_members(cfg, project):
+    """[(member, [qualified roles], revoke), ...] in declaration order; exits loud on a bad
+    entry. A `revoke: true` tombstone wants no roles."""
+    entries = cfg.get("foreign_members") or []
+    if not entries:
+        return []
+    allow, narrow = grantable_roles(strict=True), foreign_grantable_roles()
+    out, seen = [], set()
+    for entry in entries:
+        entry = entry or {}
+        member = entry.get("member") or ""
+        unknown = sorted(set(entry) - _FOREIGN_KEYS)
+        if unknown:
+            raise SystemExit(f"foreign_members: {member or '<no member>'} has unknown key(s) "
+                             f"{unknown}; allowed: {sorted(_FOREIGN_KEYS)}. Conditions are not "
+                             f"supported — a conditional grant is human-managed.")
+        if not member.startswith("serviceAccount:"):
+            raise SystemExit(
+                f"foreign_members: member {member!r} must be 'serviceAccount:<email>'. A human or "
+                f"group is granted on one of our SAs via `principals:`, never a project role.")
+        if not _FOREIGN_MEMBER_RE.match(member):
+            raise SystemExit(f"foreign_members: member {member!r} is not a well-formed "
+                             f"'serviceAccount:<id>@<domain>'")
+        own = _own_identity(member, cfg, project)
+        if own:
+            raise SystemExit(f"foreign_members: {member} is {own}; this block is for ANOTHER "
+                             f"project's identities only.")
+        if member in seen:
+            raise SystemExit(f"foreign_members: {member} is declared twice; merge the entries")
+        seen.add(member)
+        if not str(entry.get("reason") or "").strip():
+            raise SystemExit(f"foreign_members: {member} needs a non-empty `reason` — the grant "
+                             f"is invisible from the member's own project.")
+        revoke = entry.get("revoke", False)
+        if revoke not in (True, False):
+            raise SystemExit(f"foreign_members: {member}: `revoke` must be true or false")
+        roles = entry.get("roles") or []
+        if revoke:
+            if roles:
+                raise SystemExit(f"foreign_members: {member} is `revoke: true` and still lists "
+                                 f"roles — a tombstone wants nothing; drop `roles`")
+            out.append((member, [], True))
+            continue
+        if not roles:
+            raise SystemExit(f"foreign_members: {member} declares no roles (to withdraw a grant, "
+                             f"set `revoke: true` and run --prune foreign_members)")
+        qualified = []
+        for role in roles:
+            if str(role).startswith(_CAPABILITY_PREFIX):
+                raise SystemExit(f"foreign_members: {member}: capability {role!r} is not "
+                                 f"allowed here — name each role")
+            q = _qualify(role)
+            if q not in narrow:
+                raise SystemExit(
+                    f"foreign_members: {member} would be granted {q}, which is not in the engine's "
+                    f"bootstrap/foreign-grantable-roles.txt — widening it is a reviewed change.")
+            if q not in allow:
+                raise SystemExit(
+                    f"foreign_members: {member} would be granted {q}, which is not in the config "
+                    f"root's bootstrap/grantable-roles.txt — the provisioner could not grant it.")
+            qualified.append(q)
+        for q in qualified:                 # every role checked before the first write
+            require_role_exists(q)
+        out.append((member, qualified, False))
+    return out
+
+
+def _project_member_bindings(project, member):
+    """{role: {condition expression|None, ...}} the member holds on the PROJECT (live)."""
+    raw = gout(["projects", "get-iam-policy", project, "--format=json"])
+    out = {}
+    for b in (json.loads(raw).get("bindings") if raw else None) or []:
+        if member in (b.get("members") or []):
+            cond = b.get("condition") or {}
+            out.setdefault(b.get("role"), set()).add(cond.get("expression") if cond else None)
+    return out
+
+
+def ensure_foreign_members(cfg, project):
+    print("foreign_members:")
+    declared = _declared_foreign_members(cfg, project)
+    if not declared:
+        c("skip", "no foreign members declared")
+        return
+    for member, roles, revoke in declared:
+        if revoke:
+            c("skip", f"{member}: revoke: true — nothing bound; --prune foreign_members removes it")
+            continue
+        held = _project_member_bindings(project, member)
+        for role in roles:
+            if None in held.get(role, ()):
+                c("ok", f"  {role} → {member}")
+            else:
+                do(["projects", "add-iam-policy-binding", project, f"--member={member}",
+                    f"--role={role}", "--condition=None"], project, f"  bind {role} → {member}")
+
+
+def prune_foreign_members(cfg, project):
+    """Remove an UNconditional project role held by a DECLARED foreign member that the config no
+    longer lists (all of them, for a `revoke: true` tombstone). Undeclared members are never
+    touched (the engine owns no other project's identities), conditional bindings are reported
+    and kept, and a role outside grantable-roles.txt is a stray the provisioner cannot remove.
+    Not covered: once the member SA is DELETED, IAM rewrites it as `deleted:serviceAccount:…`,
+    which no declared member matches; that residue is a human's to remove."""
+    print("prune foreign_members:")
+    declared = _declared_foreign_members(cfg, project)
+    if not declared:
+        c("skip", "no foreign members declared")
+        return
+    allow, extra = grantable_roles(strict=True), False
+    for member, roles, _revoke in declared:
+        for role, conds in sorted(_project_member_bindings(project, member).items()):
+            if any(x is not None for x in conds):
+                c("skip", f"{member}: conditional binding {role} not engine-owned, kept")
+            if None not in conds or role in roles:
+                continue
+            extra = True
+            if role in allow:
+                undo(["projects", "remove-iam-policy-binding", project, f"--member={member}",
+                      f"--role={role}", "--condition=None"], project,
+                     f"unbind {role} from {member}")
+            else:
+                c("err", f"{member}: stray {role} (provisioner cannot remove — IP3)")
+                core.STRAY.append(f"{member}: {role}")
+    if not extra:
+        c("ok", "no extra foreign-member roles")
+
+
 HANDLERS = {
     "service_accounts": ensure_service_accounts,
     "act_as": ensure_act_as,
@@ -954,6 +1145,7 @@ HANDLERS = {
     # AFTER service_accounts — dict order is run order (provision.run), and this binds ON an
     # SA, so the SA has to exist first on a fresh project.
     "principals": ensure_principals,
+    "foreign_members": ensure_foreign_members,
     "wif": ensure_wif,
 }
 
@@ -1537,6 +1729,7 @@ PRUNERS = {
     "wif": prune_wif,
     "resource_roles": prune_resource_roles,
     "principals": prune_principals,
+    "foreign_members": prune_foreign_members,
     "provisioner": prune_provisioner,
     "sa_audit": audit_service_accounts,
     "secret_audit": audit_secret_policies,

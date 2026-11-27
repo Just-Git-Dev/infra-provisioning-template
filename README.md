@@ -201,6 +201,44 @@ Deliberately narrow, and it fails loud rather than widening quietly:
 all ones this config declares. A human binding the config does not mention — anyone else's
 grant on the same SA — is left alone.
 
+### `foreign_members` — a project role for ANOTHER project's service account
+
+Every other member the engine builds is one of this project's own SAs. `foreign_members` is the
+one place a config grants a **project** role to an identity it does not own. The first use is a
+staging project whose Cloud Run service agent pulls the prod project's images by digest, so
+staging runs exactly the bytes prod will run:
+
+```yaml
+foreign_members:                                 # TOP-LEVEL, in the config of the GRANTING project
+  - member: serviceAccount:service-<staging number>@serverless-robot-prod.iam.gserviceaccount.com
+    roles: [artifactregistry.reader]
+    reason: "staging pulls this project's images by digest"
+```
+
+- **A well-formed `serviceAccount:` member that is not this project's own.** Refused: this
+  project's SAs (declare them under `service_accounts:`), its default compute and App Engine SAs,
+  its own Google service agents, and the provisioner (prune would remove what ensure granted).
+  A human or group goes through `principals:`.
+- **Roles from the engine's `bootstrap/foreign-grantable-roles.txt`**, seeded with only
+  `artifactregistry.reader`. Widening it is a reviewed engine change. A role must also be in the
+  config root's `grantable-roles.txt`. Under the fleet anchor, that is the list the provisioner's
+  IAM condition enforces, so the check turns an apply-time 403 into a plan-time error. No
+  capabilities.
+- **`reason` is required.** The grant cannot be seen from the member's own project.
+- **No conditions.** Bindings are written unconditionally, one role per call.
+- **The member must exist.** A Google service agent appears only once its API is enabled in the
+  member's project, so enable it there first. The engine cannot check another project, so a
+  missing member fails at apply, in gcloud.
+
+`--prune foreign_members` removes an unconditional role only when the member is declared here and
+the role is not. It never touches an undeclared member, and it keeps conditional bindings. A role
+the provisioner cannot remove is reported as a stray, and the prune fails.
+
+**To withdraw a grant, do not delete the entry.** That would orphan the binding, because prune
+touches only declared members. Replace `roles` with `revoke: true`, keep `member` and `reason`,
+and run `--prune foreign_members`. Then drop the entry. A member SA that was already deleted
+shows up as `deleted:serviceAccount:…`; no entry matches that form, so a human removes it.
+
 ### `retire: true` — mark a service account for deletion
 
 ```yaml

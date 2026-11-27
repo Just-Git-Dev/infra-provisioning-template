@@ -5,8 +5,9 @@ the alternatives were. Newest first.
 
 ## Index
 
-30 entries. Newest first.
+31 entries. Newest first.
 
+- [2026-11-27 — foreign_members: a project role for another project's service account](#2026-11-27--foreign_members-a-project-role-for-another-projects-service-account)
 - [2026-11-23 — A laptop pre-push check refuses consumer names](#2026-11-23--a-laptop-pre-push-check-refuses-consumer-names)
 - [2026-11-23 — This public repo names no consumer project, person or org id](#2026-11-23--this-public-repo-names-no-consumer-project-person-or-org-id)
 - [2026-11-20 — resource_roles gains run_jobs and cloudtasks_queues; jgdResourceIamAdmin grows to twelve permissions and jgdQueueIamAdmin is added](#2026-11-20--resource_roles-gains-run_jobs-and-cloudtasks_queues-jgdresourceiamadmin-grows-to-twelve-permissions-and-jgdqueueiamadmin-is-added)
@@ -37,6 +38,28 @@ the alternatives were. Newest first.
 - [2026-08-21 — caller inputs move to `env:`; CI grows actionlint and lints `action.yml` itself](#2026-08-21--caller-inputs-move-to-env-ci-grows-actionlint-and-lints-actionyml-itself)
 - [2026-08-20 — SHA-pin this repo's own actions and enforce it in CI](#2026-08-20--sha-pin-this-repos-own-actions-and-enforce-it-in-ci)
 - [2026-08-20 — port the two mutation-path engine fixes from the consumer; release v1.0.1](#2026-08-20--port-the-two-mutation-path-engine-fixes-from-the-consumer-release-v101)
+
+## 2026-11-27 — foreign_members: a project role for another project's service account
+
+**Context.** A staging project is meant to be a copy of prod, and to run prod's exact image digests rather than rebuild them. Its Cloud Run service agent therefore needs `artifactregistry.reader` on the prod project. The engine could not express that, because every member it built was `serviceAccount:<name>@<this project>`. The same grant comes back for every project that gets a staging copy, so it belongs in the engine, not in a hand-run command.
+
+**Decision.** A top-level `foreign_members:` block, set in the config of the project that GRANTS the role: `member`, `roles` and a required `reason`. Ensure binds each role unconditionally, one role per call. `--prune foreign_members` removes only an unconditional role held by a declared member that the config no longer lists.
+
+**Why so narrow.**
+- **Members.** Well-formed `serviceAccount:` members only. Humans already have `principals:`, scoped to one SA.
+- **Never this project's own identities:** its SAs, its default compute and App Engine SAs, its Google agents, or the provisioner. A config cannot use this block to dodge `service_accounts:`. The default compute SA's auto-granted editor would become a permanent stray. The provisioner would be fought by `prune_provisioner` on every run.
+- **Roles.** Only those in a NEW engine-side `bootstrap/foreign-grantable-roles.txt`, seeded with `artifactregistry.reader`. The project list carries admin roles, and a foreign grant should not inherit them. A role must also be in the config root's `grantable-roles.txt`. Under the fleet anchor that is the IAM-enforced list. Under a per-project anchor it is only a plan-time convention.
+- **No capabilities and no conditions.**
+- **A required `reason`,** because the grant is invisible from the member's own project.
+
+**Revoking (a review finding before release).** Prune touches only declared members, so deleting an entry would leave its grant with no way out but a terminal command. A grant is therefore withdrawn the way an SA is retired: a `revoke: true` tombstone (member + reason, no roles) that ensure skips and `--prune foreign_members` strips.
+
+**Alternatives rejected.**
+- A registry-level grant (only the one GAR repository) is tighter, but it needs Artifact Registry IAM rights the fleet provisioner does not hold, which means a re-anchor. Project level matches what the project's own CI readers already get.
+- Staging rebuilding its own images would need no cross-project grant, but staging would then test different bytes from the ones prod runs, and gain a build path prod does not have.
+- A `service_agents`-style declare-only entry was not enough. Nothing would write the grant, so it would stay a hand step.
+
+**Not covered.** The engine cannot see the member's project, so a member that does not exist yet (a service agent appears only once its API is enabled) fails at apply, in gcloud, not at plan.
 
 ## 2026-11-23 — A laptop pre-push check refuses consumer names
 

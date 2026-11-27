@@ -1,0 +1,10 @@
+# Roles a config may grant at PROJECT level to ANOTHER project's service account, via the
+# top-level `foreign_members:` block (DECISIONS 2026-11-27).
+#
+# Narrower than grantable-roles.txt on purpose: that file lists what the provisioner may grant
+# to the project's OWN service accounts, and it includes admin roles. A foreign identity's
+# grant cannot be seen from its own project, so the list starts at the one known need: a
+# staging project's Cloud Run agent pulling this project's images. Every line is a decision.
+# A role must ALSO be in the config root's grantable-roles.txt, or the provisioner cannot
+# grant it at all.
+roles/artifactregistry.reader
