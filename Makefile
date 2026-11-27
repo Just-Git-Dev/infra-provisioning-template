@@ -58,6 +58,7 @@ tests: venv
 	$(PY) tests/test_stray_roles.py
 	$(PY) tests/test_wif_prune.py
 	$(PY) tests/test_human_managed.py
+	$(PY) tests/test_foreign_members.py
 	$(PY) tests/test_anchor.py
 	$(PY) tests/test_ci_make_targets.py
 	$(PY) tests/test_pre_push_hook.py

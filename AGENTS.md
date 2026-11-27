@@ -88,6 +88,12 @@ which pins a **full commit SHA**, not `@v1`.
   IAM does not gate it — `modifiedGrantsByRole` covers project/folder/org policies, not SA
   resource policies — so that file *is* the control. Widening it, or adding a kind, is a
   decision, not a commit.
+- **`foreign_members` is the one block whose member is ANOTHER project's service account.**
+  Top-level, project roles from the engine's `bootstrap/foreign-grantable-roles.txt` (and the
+  config root's `grantable-roles.txt`), `serviceAccount:` members that are none of this project's
+  identities (own SAs, compute/App Engine defaults, its agents, the provisioner), a required
+  `reason`, no conditions or capabilities. Prune touches only declared members; a grant is
+  withdrawn with a `revoke: true` tombstone, never by deleting the entry.
 - **Adding a provider is a new `providers/<kind>.py`** satisfying the contract core drives
   (`HANDLERS`/`PRUNERS`, `context(target)`, `preflight(ctx)`, `label(key, target, ctx)`).
   Core, the CLI and existing providers stay untouched.

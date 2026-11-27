@@ -118,10 +118,10 @@ def test_handlers_are_access_only():
     # `sa_audit` (2026-10-20) is read-only: it reports on every run and never mutates (the
     # scope line is unmoved; see DECISIONS 2026-10-20 and tests/test_repo_links.py).
     assert set(P.HANDLERS) == {"service_accounts", "act_as", "resource_roles", "principals",
-                               "wif", "sa_audit", "secret_audit"}
+                               "foreign_members", "wif", "sa_audit", "secret_audit"}
     # `wif` (2026-11-14) prunes only this project's own-pool workloadIdentityUser members.
     assert set(P.PRUNERS) == {"service_accounts", "act_as", "wif", "resource_roles", "principals",
-                              "provisioner", "sa_audit", "secret_audit"}
+                              "foreign_members", "provisioner", "sa_audit", "secret_audit"}
 
 
 def test_handler_registry_includes_principals():
