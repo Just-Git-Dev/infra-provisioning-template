@@ -6,9 +6,13 @@
 # projectIamAdmin without HOLDING them — NO serviceusage/pubsub/monitoring/logging.
 # (Scope narrowed 2026-07-01; see DECISIONS + ADR-001.)
 #
-# `{project}` is substituted with the GCP project id, by BOTH the anchor scripts and
-# the engine. A line carrying it names a PROJECT-SCOPED custom role: it can only be
-# granted per-project, so fleet-anchor.sh skips it when granting at folder/org scope.
+# `{scope}` is substituted with the provisioner's REACH, by BOTH the anchor scripts and
+# the engine: the org node (`organizations/<id>`) for an org reach, or `projects/<id>` when
+# the config names no scope. A line carrying it names a CUSTOM role defined at that reach —
+# at the org node it is created once and bound once, so a new project under the org needs no
+# per-project anchor step. A custom role cannot be defined at a folder, so a folder reach
+# refuses these lines. (An older roles file may still say `projects/{project}/roles/<id>`;
+# `{project}` is still substituted, as the project id, and that line stays per-project.)
 # Comment lines (#) and blanks are ignored.
 #
 # NOT listed here: service-account admin. The fleet SA holds the org custom role
@@ -35,17 +39,17 @@ roles/iam.workloadIdentityPoolAdmin
 # NOT to be confused with the `jgdSecretsProvisioner` role removed 2026-07-01 — that
 # one CREATED secrets. This one cannot create, delete, or read one; it only manages
 # who may access them.
-projects/{project}/roles/jgdSecretIamAdmin
+{scope}/roles/jgdSecretIamAdmin
 
 # jgdResourceIamAdmin: manage WHO may access a Cloud Run service or job, Pub/Sub topic or KMS key
 # (resource_roles run_services / run_jobs / pubsub_topics / kms_keys): get + getIamPolicy +
 # setIamPolicy per kind and nothing else. It cannot create, delete, deploy, invoke, publish
 # or use a key. Created/reconciled by the anchor scripts.
-projects/{project}/roles/jgdResourceIamAdmin
+{scope}/roles/jgdResourceIamAdmin
 
 # jgdQueueIamAdmin: manage WHO may access a Cloud Tasks queue (resource_roles cloudtasks_queues):
 # queues.get + getIamPolicy + setIamPolicy and nothing else. It cannot create, delete, pause,
 # purge a queue or enqueue. A separate role from jgdResourceIamAdmin because two of its
 # permissions are TESTING-level (gcloud prompts on create/update, and Google may withdraw them),
 # so a problem there cannot block the shared role. Created/reconciled by the anchor scripts.
-projects/{project}/roles/jgdQueueIamAdmin
+{scope}/roles/jgdQueueIamAdmin

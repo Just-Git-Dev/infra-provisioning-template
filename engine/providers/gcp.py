@@ -186,13 +186,15 @@ SCOPE_READER_ROLE_ID = "jgdScopeIamViewer"
 FLEET_SA_ADMIN_ROLE_ID = "jgdFleetSaAdmin"
 
 
-def provisioner_kept_roles(project=None):
+def provisioner_kept_roles(project=None, scope=None):
     """The provisioner's allowed roles — single source of truth shared with anchor.sh.
 
-    `{project}` in a line marks a PROJECT-SCOPED custom role (e.g.
-    `projects/{project}/roles/jgdSecretIamAdmin`) and is substituted with the project id.
-    Called without a project the placeholder is left as-is, which is only useful for
-    inspection — never for a live comparison."""
+    `{scope}` in a line marks a custom role defined at the provisioner's REACH (e.g.
+    `{scope}/roles/jgdSecretIamAdmin`): substituted with `scope` (an org node such as
+    `organizations/123`) when given, else with `projects/<project>`. `{project}` is still
+    substituted with the project id, so an older roles file keeps working. Called without a
+    project the placeholders are left as-is, which is only useful for inspection — never for
+    a live comparison."""
     path = os.path.join(core.ROOT, "bootstrap", "provisioner-roles.txt")
     roles = set()
     with open(path) as fh:
@@ -200,9 +202,23 @@ def provisioner_kept_roles(project=None):
             line = line.split("#", 1)[0].strip()
             if line:
                 if project:
+                    line = line.replace("{scope}", scope or f"projects/{project}")
                     line = line.replace("{project}", project)
                 roles.add(_qualify(line))
     return roles
+
+
+def _legacy_scope_copies(project):
+    """The project-level form of every `{scope}` line: `projects/<project>/roles/<id>`. Under an
+    org/folder scope these are the per-project copies the fleet anchor retires."""
+    path = os.path.join(core.ROOT, "bootstrap", "provisioner-roles.txt")
+    out = set()
+    with open(path) as fh:
+        for line in fh:
+            line = line.split("#", 1)[0].strip()
+            if line.startswith("{scope}/"):
+                out.add(line.replace("{scope}", f"projects/{project}"))
+    return out
 
 
 def grantable_roles(strict=True):
@@ -1620,12 +1636,19 @@ def prune_provisioner(cfg, project):
     """
     print("prune provisioner SA:")
     email, scope = provisioner_identity(cfg, project)
-    keep = provisioner_kept_roles(project)
+    keep = provisioner_kept_roles(project, scope)
+    legacy = _legacy_scope_copies(project) if scope else set()
     live = sa_project_roles(project, email)
     if live:
         for role in live:
             if role in keep:
                 c("ok", f"keep {role}")
+            elif role in legacy:
+                # Kept, not pruned: a prune between the engine upgrade and the anchor run must
+                # not strip the only working copy of the role.
+                c("ok", f"keep {role}")
+                print(f"::warning::legacy per-project copy of {role.rsplit('/', 1)[1]}; "
+                      "the fleet anchor removes it")
             else:
                 _remove_binding(project, email, role, email.split("@")[0])
     elif not scope:

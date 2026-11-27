@@ -5,8 +5,9 @@ the alternatives were. Newest first.
 
 ## Index
 
-31 entries. Newest first.
+32 entries. Newest first.
 
+- [2026-11-27 — Provisioner custom roles live at the provisioner's reach ({scope}), not in every project](#2026-11-27--provisioner-custom-roles-live-at-the-provisioners-reach-scope-not-in-every-project)
 - [2026-11-27 — foreign_members: a project role for another project's service account](#2026-11-27--foreign_members-a-project-role-for-another-projects-service-account)
 - [2026-11-23 — A laptop pre-push check refuses consumer names](#2026-11-23--a-laptop-pre-push-check-refuses-consumer-names)
 - [2026-11-23 — This public repo names no consumer project, person or org id](#2026-11-23--this-public-repo-names-no-consumer-project-person-or-org-id)
@@ -38,6 +39,13 @@ the alternatives were. Newest first.
 - [2026-08-21 — caller inputs move to `env:`; CI grows actionlint and lints `action.yml` itself](#2026-08-21--caller-inputs-move-to-env-ci-grows-actionlint-and-lints-actionyml-itself)
 - [2026-08-20 — SHA-pin this repo's own actions and enforce it in CI](#2026-08-20--sha-pin-this-repos-own-actions-and-enforce-it-in-ci)
 - [2026-08-20 — port the two mutation-path engine fixes from the consumer; release v1.0.1](#2026-08-20--port-the-two-mutation-path-engine-fixes-from-the-consumer-release-v101)
+
+## 2026-11-27 — Provisioner custom roles live at the provisioner's reach ({scope}), not in every project
+
+Provisioner custom roles (`jgdSecretIamAdmin`, `jgdResourceIamAdmin`, `jgdQueueIamAdmin`) used to be defined and bound in every project (`projects/{project}/roles/<id>`), so onboarding a project under an org meant a per-project anchor step before the provisioner could set IAM on a resource there. `bootstrap/provisioner-roles.txt` now says `{scope}/roles/<id>`: the provisioner's reach. Under an org reach the roles are created once at the org and bound once at the org node, so a new project under the org needs no anchor step. With no scope in the config, `{scope}` resolves to `projects/<id>`, so a per-project anchor behaves as before; `{project}` is still substituted, so older roles files keep working.
+Engine: `provisioner_kept_roles(project, scope)` takes the config's scope, so each config is audited against its own org (computed per call). Under an org/folder scope a project-level binding of the legacy `projects/<id>/roles/<id>` form is KEPT with a `::warning::`, so a prune between the engine upgrade and the anchor run cannot strip the only working copy.
+Anchors: `fleet-anchor.sh` creates `{scope}` roles with `--organization=` under REACH=org, per project under REACH=grant, and refuses REACH=folder up front (a custom role cannot be defined at a folder). Consequence: a folder reach needs a roles file with no `{scope}` lines.
+Not done here: the fleet anchor does not yet remove the legacy per-project copies, although the engine warning says it will. Until it does, they linger (kept, warned).
 
 ## 2026-11-27 — foreign_members: a project role for another project's service account
 

@@ -120,7 +120,7 @@ echo "WIF pool/provider: $POOL_ID / $PROVIDER_ID (dedicated)"
 
 
 # ── project-scoped custom roles ─────────────────────────────────────────────
-# A line in provisioner-roles.txt carrying `{project}` names a PROJECT-SCOPED custom
+# A line in provisioner-roles.txt carrying `{scope}` (here: `projects/<id>`) names a PROJECT-SCOPED custom
 # role. It must exist before it can be granted, and it is reconciled (not just created)
 # so a permission added to CUSTOM_ROLE_PERMS below reaches projects anchored earlier.
 #
@@ -253,10 +253,11 @@ anchor_one(){
   #    project-scoped CUSTOM role: create/reconcile it first, then grant it.
   local role role_id
   for role in "${PROVISIONER_ROLES[@]}"; do
-    if [ "${role#*\{project\}}" != "$role" ]; then
+    if [ "${role#*\{project\}}" != "$role" ] || [ "${role#*\{scope\}}" != "$role" ]; then
       role_id="${role##*/}"
       ensure_custom_role "$proj" "$role_id" || return 1
       role="${role//\{project\}/$proj}"
+      role="${role//\{scope\}/projects/$proj}"   # a per-project anchor's reach IS the project
     fi
     if project_has_role "$proj" "$role" "serviceAccount:$sa"; then ok "role $role"
     else do_or_dry g projects add-iam-policy-binding "$proj" \
