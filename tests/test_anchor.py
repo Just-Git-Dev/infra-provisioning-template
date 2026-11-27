@@ -95,45 +95,27 @@ def test_a_real_run_still_claims_and_mutates():
 # dry-run cannot see it: the engine reports zero drift over a subsystem it cannot read.
 REACH_MODES = [
     ("org", {"REACH": "org", "ORG_ID": "123456789012"}),
-    # folder reach needs ORG_ID too: a custom role cannot be created at folder scope, so
-    # jgdScopeIamViewer is defined at the org and granted at the folder.
-    ("folder", {"REACH": "folder", "FOLDER_ID": "123456789", "ORG_ID": "123456789012"}),
 ]
+# folder reach needs ORG_ID too (jgdScopeIamViewer is defined at the org, granted at the folder).
+# It is NOT in REACH_MODES: the shipped roles file carries `{scope}` custom roles, which a
+# folder cannot hold, so fleet-anchor.sh refuses it (test_folder_reach_refuses_scope_roles).
+FOLDER_REACH = {"REACH": "folder", "FOLDER_ID": "123456789", "ORG_ID": "123456789012"}
 
 # The shipped template carries one placeholder row; keep the assertion derived from it
 # rather than hard-coding, so a consumer editing PROJECTS does not break the test.
 TARGET = "your-gcp-project"
 
 
-def test_scope_reach_still_binds_project_scoped_custom_role():
+def test_scope_reach_binds_scope_custom_roles_at_the_org_not_per_project():
+    """Superseded the per-project binding: a `{scope}` role is created and bound ONCE at the org,
+    so a new project under the org needs no per-project step."""
     for mode, env in REACH_MODES:
         out, _ = run_anchor("fleet-anchor.sh", dict(env, HOST_PROJECT="host-project"))
-        needle = "projects/%s/roles/jgdSecretIamAdmin" % TARGET
-        assert needle in out, (
-            "REACH=%s: no per-project jgdSecretIamAdmin binding planned. A project-scoped "
-            "custom role cannot be granted at folder/org scope, so it must still be bound "
-            "per-project — otherwise resource_roles.secrets fails PERMISSION_DENIED "
-            "fleet-wide after cutover.\n%s" % (mode, out))
-        needle = "projects/%s/roles/jgdResourceIamAdmin" % TARGET
-        assert needle in out, (
-            "REACH=%s: no per-project jgdResourceIamAdmin binding planned (resource_roles "
-            "run_services/pubsub_topics/kms_keys would fail PERMISSION_DENIED).\n%s" % (mode, out))
-        needle = "projects/%s/roles/jgdQueueIamAdmin" % TARGET
-        assert needle in out, (
-            "REACH=%s: no per-project jgdQueueIamAdmin binding planned (resource_roles "
-            "cloudtasks_queues would fail PERMISSION_DENIED).\n%s" % (mode, out))
-
-
-def test_scope_reach_does_not_grant_custom_role_at_scope():
-    """The converse guard: granting a project-scoped custom role AT org/folder scope would
-    fail at apply time (the role does not exist there). Per-project binding is the fix."""
-    for mode, env in REACH_MODES:
-        out, _ = run_anchor("fleet-anchor.sh", dict(env, HOST_PROJECT="host-project"))
-        for ln in out.splitlines():
-            if "jgdSecretIamAdmin" in ln and ("organizations add-iam-policy-binding" in ln
-                                              or "folders add-iam-policy-binding" in ln):
-                raise AssertionError("REACH=%s: planned a project-scoped custom role at "
-                                     "%s scope: %s" % (mode, mode, ln))
+        for rid in ("jgdSecretIamAdmin", "jgdResourceIamAdmin", "jgdQueueIamAdmin"):
+            needle = "organizations/%s/roles/%s" % (env["ORG_ID"], rid)
+            assert needle in out, "REACH=%s: no org binding of %s planned\n%s" % (mode, rid, out)
+            assert "projects/%s/roles/%s" % (TARGET, rid) not in out, (
+                "REACH=%s: %s is still planned per project\n%s" % (mode, rid, out))
 
 
 def test_scope_reader_role_is_read_only_and_granted():
@@ -314,6 +296,44 @@ def test_engine_and_script_agree_on_the_fleet_sa_admin_role():
     assert gcp.FLEET_SA_ADMIN_ROLE_ID == line[0].split("=", 1)[1].strip().strip('"')
 
 
+def test_org_reach_creates_scope_roles_at_the_org_and_binds_them_there():
+    env = dict(REACH_MODES[0][1], ORG_ID="123", HOST_PROJECT="host-project")
+    out, _ = run_anchor("fleet-anchor.sh", env)
+    would = _would_lines(out)
+    for rid in ("jgdSecretIamAdmin", "jgdResourceIamAdmin", "jgdQueueIamAdmin"):
+        assert any("roles create %s " % rid in ln and "--organization=123" in ln for ln in would), (rid, would)
+        assert any("organizations add-iam-policy-binding" in ln
+                   and "--role=organizations/123/roles/%s" % rid in ln for ln in would), (rid, would)
+        assert not [ln for ln in would if "projects/" in ln and "/roles/%s" % rid in ln], (rid, would)
+        assert not [ln for ln in would if "roles create %s " % rid in ln and "--project=" in ln], (rid, would)
+
+
+def test_grant_reach_keeps_scope_roles_per_project():
+    out, _ = run_anchor("fleet-anchor.sh", {"HOST_PROJECT": "host-project", "REACH": "grant"})
+    assert "projects/%s/roles/jgdSecretIamAdmin" % TARGET in out, out
+
+
+def test_folder_reach_refuses_scope_roles():
+    env = dict(FOLDER_REACH, HOST_PROJECT="host-project")
+    with tempfile.TemporaryDirectory() as tmp:
+        stub = os.path.join(tmp, "gcloud")
+        with open(stub, "w") as fh:
+            fh.write(STUB)
+        os.chmod(stub, 0o755)
+        e = dict(os.environ, PATH=tmp + os.pathsep + os.environ["PATH"], DRY_RUN="1",
+                 STUB_LOG=os.path.join(tmp, "m.log"), **env)
+        proc = subprocess.run(["bash", os.path.join(ROOT, "bootstrap", "fleet-anchor.sh")],
+                              capture_output=True, text=True, env=e)
+    assert proc.returncode != 0, proc.stdout
+    assert "cannot be defined at a folder" in proc.stdout + proc.stderr
+
+
+def test_per_project_anchor_substitutes_scope_with_the_project():
+    out, _ = run_anchor("anchor.sh", {})
+    assert "{scope}" not in out and "{project}" not in out, out
+    assert "/roles/jgdSecretIamAdmin" in out
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0
@@ -326,3 +346,4 @@ if __name__ == "__main__":
             print(f"FAIL {fn.__name__}: {e}")
     print(f"\n{len(fns) - failed}/{len(fns)} passed")
     sys.exit(1 if failed else 0)
+

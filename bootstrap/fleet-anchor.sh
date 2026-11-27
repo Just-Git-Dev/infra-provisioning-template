@@ -135,6 +135,16 @@ case "$REACH" in
   *) err "REACH must be one of: grant | folder | org (got '$REACH')"; exit 1 ;;
 esac
 
+if [ "$REACH" = folder ]; then
+  for _r in "${PROVISIONER_ROLES[@]}"; do
+    case "$_r" in *"{scope}"*)
+      err "REACH=folder: '$_r' is a {scope} custom role, and a custom role cannot be defined at a folder."
+      err "  Use REACH=org (with ORG_ID) or REACH=grant."
+      exit 1 ;;
+    esac
+  done
+fi
+
 FLEET_SA="${SA_ID}@${HOST_PROJECT}.iam.gserviceaccount.com"
 
 echo "Active account  : $ACTIVE"
@@ -148,16 +158,18 @@ echo "Reach mode      : $REACH${FOLDER_ID:+ (folder $FOLDER_ID)}${ORG_ID:+ (org 
 # ── idempotent binding checks (per scope) ────────────────────────────────────
 
 # ── project-scoped custom roles ─────────────────────────────────────────────
-# A line in provisioner-roles.txt carrying `{project}` names a PROJECT-SCOPED custom
-# role. It must exist before it can be granted, and it is reconciled (not just created)
+# A line in provisioner-roles.txt carrying `{scope}` names a custom role at the provisioner's
+# REACH: created at the ORG under REACH=org (once, bound at the org), per project under
+# REACH=grant, refused under REACH=folder (a custom role cannot be defined at a folder). A
+# legacy `{project}` line is a PROJECT-SCOPED custom role, always per-project. It must exist before it can be granted, and it is reconciled (not just created)
 # so a permission added to CUSTOM_ROLE_PERMS below reaches projects anchored earlier.
 #
 # Only jgdSecretIamAdmin is defined today: the three permissions the engine needs to
 # manage IAM ON a secret (resource_roles.secrets, ADR-005). Deliberately NOT
 # roles/secretmanager.admin — that includes secretmanager.versions.access, which would
 # let the identity broker read every secret payload in the fleet.
-ensure_custom_role(){ # proj role_id
-  local proj="$1" id="$2" perms title desc live want
+ensure_custom_role(){ # scope-flag role_id   (scope-flag: --project=<id> | --organization=<id>)
+  local sf="$1" id="$2" perms title desc live want
   case "$id" in
     jgdSecretIamAdmin)
       # Exactly what the engine needs to manage IAM ON a secret, and nothing more.
@@ -190,21 +202,21 @@ ensure_custom_role(){ # proj role_id
   esac
   # A deleted-but-not-purged role still describes (GCP keeps it ~7 days); an update on one
   # fails loud, which is the right outcome — undelete is a human decision, not a script's.
-  live="$(g iam roles describe "$id" --project="$proj" \
+  live="$(g iam roles describe "$id" "$sf" \
             --format='value[delimiter=","](includedPermissions)' 2>/dev/null || true)"
   # Compare the DESCRIPTION too, not just permissions: a role whose description goes stale
   # (or predates provenance) would otherwise never be corrected — the audit of 2026-08-30
   # found exactly that.
-  live_desc="$(g iam roles describe "$id" --project="$proj" \
+  live_desc="$(g iam roles describe "$id" "$sf" \
                 --format='value(description)' 2>/dev/null || true)"
   want="$(printf '%s' "$perms" | tr ',' '\n' | sort | tr '\n' ' ')"
   if [ -z "$live" ]; then
-    do_or_dry g iam roles create "$id" --project="$proj" --title="$title" \
+    do_or_dry g iam roles create "$id" "$sf" --title="$title" \
       --description="$desc" --permissions="$perms" --stage=GA >/dev/null && add "custom role $id"
   elif [ "$(printf '%s' "$live" | tr ',' '\n' | sort | tr '\n' ' ')" != "$want" ] \
        || [ "$live_desc" != "$desc" ]; then
     # Reconcile: the role exists but its permissions have drifted from this definition.
-    do_or_dry g iam roles update "$id" --project="$proj" --title="$title" \
+    do_or_dry g iam roles update "$id" "$sf" --title="$title" \
       --description="$desc" --permissions="$perms" --stage=GA >/dev/null \
       && add "custom role $id (metadata synced)"
   else
@@ -502,10 +514,11 @@ grant_project(){ # key
   ensure_apis "$proj"
   local role_id
   for role in "${PROVISIONER_ROLES[@]}"; do
-    if [ "${role#*\{project\}}" != "$role" ]; then
+    if [ "${role#*\{project\}}" != "$role" ] || [ "${role#*\{scope\}}" != "$role" ]; then
       role_id="${role##*/}"
-      ensure_custom_role "$proj" "$role_id" || return 1
+      ensure_custom_role "--project=$proj" "$role_id" || return 1
       role="${role//\{project\}/$proj}"
+      role="${role//\{scope\}/projects/$proj}"   # REACH=grant: the reach IS the project
     fi
     if project_has_role "$proj" "$role" "serviceAccount:$FLEET_SA"; then ok "role $role"
     else do_or_dry g projects add-iam-policy-binding "$proj" \
@@ -518,10 +531,13 @@ grant_scope(){ # kind id  (folder|org)
   echo ""
   echo "──────────── reach: $kind $id (inherited by all projects under it) ────────────"
   for role in "${PROVISIONER_ROLES[@]}"; do
-    # A project-scoped custom role cannot be granted at folder/org scope — it does not
-    # exist there. Those are bound per-project: by grant_project under REACH=grant, and by
-    # grant_project_custom_roles under folder/org reach (which also enables the APIs).
-    if [ "${role#*\{project\}}" != "$role" ]; then
+    # A `{scope}` role is defined at the org (REACH=org; REACH=folder was refused up front) and
+    # bound here once. A legacy `{project}` role cannot exist at folder/org scope: it is bound
+    # per-project by grant_project_custom_roles (which also enables the APIs).
+    if [ "${role#*\{scope\}}" != "$role" ]; then
+      ensure_custom_role "--organization=$id" "${role##*/}" || return 1
+      role="${role//\{scope\}/organizations/$id}"
+    elif [ "${role#*\{project\}}" != "$role" ]; then
       ok "skip $role (project-scoped custom role — granted per-project)"
       continue
     fi
@@ -603,10 +619,11 @@ grant_project_custom_roles(){ # key
   fi
   ensure_apis "$proj"
   for role in "${PROVISIONER_ROLES[@]}"; do
-    # predefined roles came from the scope grant; only the {project}-templated ones remain
+    # predefined roles and {scope} roles (org-level) came from the scope grant; only the legacy
+    # {project}-templated ones remain per-project
     [ "${role#*\{project\}}" != "$role" ] || continue
     role_id="${role##*/}"
-    ensure_custom_role "$proj" "$role_id" || return 1
+    ensure_custom_role "--project=$proj" "$role_id" || return 1
     role="${role//\{project\}/$proj}"
     if project_has_role "$proj" "$role" "serviceAccount:$FLEET_SA"; then ok "role $role"
     else do_or_dry g projects add-iam-policy-binding "$proj" \

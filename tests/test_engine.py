@@ -1389,6 +1389,62 @@ def test_principal_grantable_roles_is_seeded_with_exactly_token_creator():
     assert P.principal_grantable_roles() == {_TOKEN_CREATOR}
 
 
+# ── `{scope}`: provisioner custom roles at the provisioner's REACH ───────────
+def test_kept_roles_with_an_org_scope_name_the_org_roles():
+    keep = P.provisioner_kept_roles("my-project", scope="organizations/123")
+    for rid in ("jgdSecretIamAdmin", "jgdResourceIamAdmin", "jgdQueueIamAdmin"):
+        assert f"organizations/123/roles/{rid}" in keep, keep
+        assert f"projects/my-project/roles/{rid}" not in keep, keep
+    assert not any("{" in r for r in keep), keep
+
+
+def test_kept_roles_without_a_scope_keep_the_project_form():
+    keep = P.provisioner_kept_roles("my-project")
+    assert "projects/my-project/roles/jgdSecretIamAdmin" in keep
+    assert not any("{" in r for r in keep), keep
+
+
+def _scoped_cfg(org):
+    return {"provisioner": {"service_account": "fleet@host.iam.gserviceaccount.com",
+                            "scope": f"organizations/{org}"}}
+
+
+def _org_gmap(scope_roles, project_roles=()):
+    def gmap(args):
+        j = " ".join(args)
+        if "organizations" in j or "folders" in j:
+            return "\n".join(scope_roles)
+        return "\n".join(project_roles)
+    return gmap
+
+
+def test_two_orgs_audit_independently():
+    org_a_role = "organizations/123/roles/jgdSecretIamAdmin"
+    ok = drive(P.prune_provisioner, _scoped_cfg("123"), _org_gmap([org_a_role]))
+    assert f"keep {org_a_role}" in ok, ok
+    try:
+        out = drive(P.prune_provisioner, _scoped_cfg("456"), _org_gmap([org_a_role]))
+    except SystemExit as e:
+        assert f"undeclared role {org_a_role}" in str(e), e
+    else:
+        raise AssertionError("org A's role passed the audit at org B:\n" + out)
+
+
+def test_prune_under_an_org_scope_keeps_and_warns_on_the_legacy_project_copy():
+    legacy = "projects/p/roles/jgdSecretIamAdmin"
+    out = drive(P.prune_provisioner, _scoped_cfg("123"),
+                _org_gmap(["organizations/123/roles/jgdSecretIamAdmin"], [legacy]))
+    assert f"keep {legacy}" in out, out
+    assert "legacy per-project copy of jgdSecretIamAdmin; remove it once the role is bound at the scope" in out, out
+    assert "would unbind" not in out, out
+
+
+def test_prune_under_an_org_scope_still_removes_an_unrelated_project_role():
+    out = drive(P.prune_provisioner, _scoped_cfg("123"),
+                _org_gmap(["organizations/123/roles/jgdSecretIamAdmin"], ["roles/editor"]))
+    assert "would unbind roles/editor" in out, out
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0
@@ -1404,3 +1460,4 @@ if __name__ == "__main__":
             print(f"ERROR {fn.__name__}: {type(e).__name__}: {e}")
     print(f"\n{len(fns)-failed}/{len(fns)} passed")
     sys.exit(1 if failed else 0)
+
