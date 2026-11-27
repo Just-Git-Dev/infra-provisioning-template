@@ -1435,7 +1435,7 @@ def test_prune_under_an_org_scope_keeps_and_warns_on_the_legacy_project_copy():
     out = drive(P.prune_provisioner, _scoped_cfg("123"),
                 _org_gmap(["organizations/123/roles/jgdSecretIamAdmin"], [legacy]))
     assert f"keep {legacy}" in out, out
-    assert "legacy per-project copy of jgdSecretIamAdmin; the fleet anchor removes it" in out, out
+    assert "legacy per-project copy of jgdSecretIamAdmin; remove it once the role is bound at the scope" in out, out
     assert "would unbind" not in out, out
 
 

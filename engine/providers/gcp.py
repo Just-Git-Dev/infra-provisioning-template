@@ -1648,7 +1648,7 @@ def prune_provisioner(cfg, project):
                 # not strip the only working copy of the role.
                 c("ok", f"keep {role}")
                 print(f"::warning::legacy per-project copy of {role.rsplit('/', 1)[1]}; "
-                      "the fleet anchor removes it")
+                      "remove it once the role is bound at the scope")
             else:
                 _remove_binding(project, email, role, email.split("@")[0])
     elif not scope:
